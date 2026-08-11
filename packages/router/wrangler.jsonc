@@ -3,6 +3,7 @@
   "name": "router",
   "main": "src/index.ts",
   "compatibility_date": "2026-02-02",
+  "routes": [{ "pattern": "os-erxes.darjs.dev", "custom_domain": true }],
 
   // Gatekeeper service bindings (GATEKEEPER_*) are added dynamically at deploy time — by the
   // deploy service for customer instances, from the release manifest's binding templates. Only
@@ -11,6 +12,10 @@
     {
       "binding": "WORKSHOP_BACKEND",
       "service": "workshop-backend"
+    },
+    {
+      "binding": "GATEKEEPER_ERXES",
+      "service": "gatekeeper-erxes"
     }
   ],
 

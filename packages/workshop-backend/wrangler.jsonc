@@ -39,8 +39,23 @@
   },
 
   // Gatekeeper service bindings and the Workers AI binding are dynamically
-  // added by run-dev-server.js (for dev) and generate-wrangler-prod.js (for
-  // production).
+  // added by run-dev-server.js (for dev) and the deploy service (for production).
+  "services": [
+    {
+      "binding": "GATEKEEPER_ERXES",
+      "service": "gatekeeper-erxes",
+      "entrypoint": "GatekeeperVendor"
+    }
+  ],
+  "vars": {
+    "ADMINS": ["amaraaamka0404@gmail.com"],
+    "PUBLIC_BASE_URL": "https://os-erxes.darjs.dev",
+    "AUTH_GATEKEEPERS": "erxes",
+    "DISABLE_PASSWORD_AUTH": "true",
+    "CF_AI_GATEWAY": "default",
+    "CF_AI_GATEWAY_ACCOUNT_ID": "8752869fa1eec4bbfc9c6f4f64fd3bfe",
+    "CF_AI_GATEWAY_PROVIDERS": "deepseek"
+  },
 
   "migrations": [
     {
@@ -64,10 +79,12 @@
   "kv_namespaces": [
     {
       "binding": "BLUEPRINTS",
+      "id": "072e7c700aa34aebb88ce673826e1924",
       "preview_id": "gadgets-blueprint-metadata"
     },
     {
       "binding": "AVATARS",
+      "id": "36741d39f31a480495bb55cd2466300a",
       "preview_id": "gadgets-avatars"
     }
   ],
