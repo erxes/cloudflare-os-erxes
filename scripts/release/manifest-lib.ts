@@ -271,7 +271,7 @@ const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
 // ambient gatekeeper, so a second install would hand every user a duplicate ambient capsule.
 // Independent of PREINSTALL in principle; the two sets coincide today only because every ambient
 // gatekeeper we ship is also preinstalled.
-const SINGLETON = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
+const SINGLETON = new Set(["gatekeeper-context", "gatekeeper-erxes", "gatekeeper-scheduler"]);
 
 /** Default wizard inputs for an installable gatekeeper that fronts a third-party OAuth app. */
 export const DEFAULT_CRED_INPUTS: DeployInput[] = [

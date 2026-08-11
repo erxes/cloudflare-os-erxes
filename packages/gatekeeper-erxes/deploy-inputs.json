@@ -1,0 +1,17 @@
+[
+  {
+    "name": "ERXES_GRAPHQL_URL",
+    "kind": "secret",
+    "label": "erxes GraphQL URL"
+  },
+  {
+    "name": "EXECUTOR_URL",
+    "kind": "secret",
+    "label": "Executor URL"
+  },
+  {
+    "name": "EXECUTOR_AUTH_SECRET",
+    "kind": "secret",
+    "label": "Shared Executor auth secret"
+  }
+]

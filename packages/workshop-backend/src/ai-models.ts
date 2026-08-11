@@ -10,7 +10,9 @@ import { stream as openaiCompletionsStream } from "@earendil-works/pi-ai/api/ope
 import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
+import { DEEPSEEK_MODELS } from "@earendil-works/pi-ai/providers/deepseek.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
+import { KIMI_CODING_MODELS } from "@earendil-works/pi-ai/providers/kimi-coding.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
@@ -133,6 +135,8 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "openai": return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId];
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
+    case "deepseek": return (DEEPSEEK_MODELS as Record<string, Model<Api>>)[modelId];
+    case "kimi": return (KIMI_CODING_MODELS as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
     default: return undefined;
   }
@@ -227,6 +231,20 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         ...window,
         thinkingLevelMap: catalog?.thinkingLevelMap,
       };
+    case "deepseek":
+      return {
+        id: config.model,
+        name: catalog?.name ?? config.model,
+        api: "openai-completions",
+        provider: "deepseek",
+        baseUrl: `${gatewayUrl}/deepseek`,
+        reasoning: catalog?.reasoning ?? true,
+        input: catalog?.input ?? ["text"],
+        cost: catalog?.cost ?? ZERO_COST,
+        ...window,
+        thinkingLevelMap: catalog?.thinkingLevelMap,
+        compat: catalog?.compat,
+      };
     case "cloudflare":
       // Workers AI's own OpenAI-compatible endpoint, exposed through the gateway's workers-ai
       // route. This is Workers AI's native chat API (the same surface as its direct
@@ -242,6 +260,21 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         cost: catalog?.cost ?? ZERO_COST,
         ...window,
         compat: workersAiCompat(catalog),
+      };
+    case "kimi":
+      return {
+        id: config.model,
+        name: catalog?.name ?? config.model,
+        api: "anthropic-messages",
+        provider: "kimi-coding",
+        baseUrl: `${gatewayUrl}/custom-kimi-coding/coding`,
+        reasoning: catalog?.reasoning ?? true,
+        input: catalog?.input ?? ["text", "image"],
+        cost: catalog?.cost ?? ZERO_COST,
+        ...window,
+        headers: catalog?.headers ?? { "User-Agent": "KimiCLI/1.5" },
+        thinkingLevelMap: catalog?.thinkingLevelMap,
+        compat: catalog?.compat,
       };
     default:
       return undefined;
@@ -356,9 +389,16 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
-  // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
-  // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
-  // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
+  // Kimi's firewall blocks direct requests from Workers. Route it through the deployment's
+  // custom AI Gateway provider when this deployment offers Kimi, while keeping the user's key.
+  if (config.provider === "kimi") {
+    const gateway = getAiGatewayConfig(env);
+    return gateway && env.CF_AI_GATEWAY_KIMI_CUSTOM === "true"
+      ? getModelViaGateway(gateway, config, initiator, options)
+      : getModelDirect(config, options.sessionAffinity);
+  }
+
+  // BYOK: a connected user's own Cloudflare account pays for providers supported by AI Gateway.
   if (options.userGateway) {
     return getModelViaUserGateway(
         config, buildMetadata(initiator, options.metadata), options.userGateway,
@@ -487,6 +527,7 @@ function getModelViaGateway(
     );
   }
 
+  const usesConfiguredKey = config.provider === "kimi";
   return makeHandle({
     model,
     // The google API impl requires an apiKey (it doesn't recognize header-owned auth), and the
@@ -496,7 +537,10 @@ function getModelViaGateway(
     // documented stored-key flow for this SDK is to pass the *gateway token* as the SDK API key:
     // the gateway recognizes its own token there and applies the stored Google key instead.
     ...(config.provider === "google" ? { apiKey: gwConfig.apiToken } : {}),
-    headers: gatewayAuthHeaders,
+    ...(usesConfiguredKey ? { apiKey: config.apiToken } : {}),
+    headers: usesConfiguredKey
+      ? { "cf-aig-authorization": `Bearer ${gwConfig.apiToken}` }
+      : gatewayAuthHeaders,
     ...(binding ? { fetch: bindingFetch(binding) } : {}),
     gatewayMetadata: metadata,
     sessionAffinity: options.sessionAffinity,
@@ -567,6 +611,43 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           cost: catalog?.cost ?? ZERO_COST,
           ...window,
           thinkingLevelMap: catalog?.thinkingLevelMap,
+        },
+        apiKey: config.apiToken,
+        sessionAffinity,
+      });
+    case "deepseek":
+      return makeHandle({
+        model: {
+          id: config.model,
+          name: catalog?.name ?? config.model,
+          api: "openai-completions",
+          provider: "deepseek",
+          baseUrl: config.apiUrl ?? "https://api.deepseek.com",
+          reasoning: catalog?.reasoning ?? true,
+          input: catalog?.input ?? ["text"],
+          cost: catalog?.cost ?? ZERO_COST,
+          ...window,
+          thinkingLevelMap: catalog?.thinkingLevelMap,
+          compat: catalog?.compat,
+        },
+        apiKey: config.apiToken,
+        sessionAffinity,
+      });
+    case "kimi":
+      return makeHandle({
+        model: {
+          id: config.model,
+          name: catalog?.name ?? config.model,
+          api: "anthropic-messages",
+          provider: "kimi-coding",
+          baseUrl: config.apiUrl ?? "https://api.kimi.com/coding",
+          reasoning: catalog?.reasoning ?? true,
+          input: catalog?.input ?? ["text", "image"],
+          cost: catalog?.cost ?? ZERO_COST,
+          ...window,
+          headers: catalog?.headers ?? { "User-Agent": "KimiCLI/1.5" },
+          thinkingLevelMap: catalog?.thinkingLevelMap,
+          compat: catalog?.compat,
         },
         apiKey: config.apiToken,
         sessionAffinity,

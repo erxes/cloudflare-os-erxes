@@ -65,6 +65,11 @@ function areCredentialsValid(record: ConnectedAccountRecord): boolean {
  * Gateway billing flow is Cloudflare-specific, so several places key off this literal.
  */
 export const CLOUDFLARE_VENDOR_ID = "cloudflare";
+export const ERXES_VENDOR_ID = "erxes";
+
+export function loginCreatesConnectedAccount(vendorId: string) {
+  return vendorId === CLOUDFLARE_VENDOR_ID || vendorId === ERXES_VENDOR_ID;
+}
 
 export type UserAiModelRecord = {
   profile: AiChatAuthorInfo;
@@ -549,7 +554,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
     let gwConfig = getAiGatewayConfig(this.env);
-    if (gwConfig && !gwConfig.providers.has(config.provider)) {
+    const keyedKimi = config.provider === "kimi" && this.env.CF_AI_GATEWAY_KIMI_CUSTOM === "true";
+    if (gwConfig && !gwConfig.providers.has(config.provider) && !keyedKimi) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
     }
 
@@ -1553,11 +1559,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Persist a connected gatekeeper account that was established during sign-in (rather than via the
-   * usual logged-in connectAccount flow). Used for providers like Cloudflare where signing in also
-   * links the account for AI Gateway billing: the login callback resolves this user by verified
-   * email, then calls here to store the resulting grant. That grant covers billing only: sign-in
-   * requests no gadget-facing resources, so any later resource access is authorized separately.
+   * Persist a connected gatekeeper account established during sign-in rather than through the usual
+   * logged-in connectAccount flow. The login callback resolves this user by verified email, then
+   * stores the resulting capability. Cloudflare's grant covers billing only; other providers may
+   * connect their full account capability.
    */
   async linkConnectedAccountFromLogin(
       account: Fetcher<GatekeeperUser>, vendorId: string, expiresAt?: Date): Promise<void> {
@@ -1572,15 +1577,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (uniqueName) {
       let existing = this.#findConnectedAccountByIdentity(vendorId, uniqueName);
       if (existing) {
-        // Drop the now-stale grant (a separate gatekeeper-side object from the fresh one), then point
-        // the existing record — keeping its id, so UI references stay stable — at the fresh grant.
-        try {
-          await existing.account.revoke();
-        } catch (err) {
-          logger.error("failed to revoke stale grant; replacing anyway", {
-            event: "account.stale.grant.revoke.failed",
-            accountId: existing.id, vendorId, error: err,
-          });
+        // Erxes reuses one stable account capability and updates its credential in place. Other
+        // providers mint a new grant, so revoke their stale capability before replacing it.
+        if (vendorId !== ERXES_VENDOR_ID) {
+          try {
+            await existing.account.revoke();
+          } catch (err) {
+            logger.error("failed to revoke stale grant; replacing anyway", {
+              event: "account.stale.grant.revoke.failed",
+              accountId: existing.id, vendorId, error: err,
+            });
+          }
         }
         existing.account = account;
         existing.description = description;

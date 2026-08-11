@@ -22,7 +22,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
-import { CLOUDFLARE_VENDOR_ID } from "../user.js";
+import { loginCreatesConnectedAccount } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
 
 const logger = createWorkshopLogger("workshop.auth");
@@ -120,10 +120,9 @@ export class LoginConnectCallbackImpl
         await pending.fail("New sign-ups are currently disabled on this deployment.");
         return;
       }
-      // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
-      // requested full (non-transient) scopes, so persist the grant as a connected account before
-      // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
-      if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
+      // Some sign-in providers also supply a lasting account capability. Persist those accounts
+      // before handing the browser its session; all other sign-in grants remain transient.
+      if (loginCreatesConnectedAccount(this.ctx.props.vendorId)) {
         await userStub.linkConnectedAccountFromLogin(account, this.ctx.props.vendorId, expiresAt);
       }
       // Session tokens are "<doName>:<secret>"; PublicApi.authenticate() routes via idFromName of
@@ -144,11 +143,9 @@ export class LoginConnectCallbackImpl
   }
 
   /**
-   * No-ops: for transient sign-in grants there's nothing persisted to update. For the Cloudflare
-   * billing connection (persisted on login) these would ideally flip the account's credential flag,
-   * but the callback doesn't carry the user/account identity (it's only learned in complete()). The
-   * billing path degrades gracefully regardless — getUsableAccessToken() returns null on expiry and
-   * the user falls back to the free tier / a reconnect prompt.
+   * No-ops: transient sign-in grants are not persisted. For providers that also connect an account
+   * during login, this callback does not retain the resolved Workshop user/account id after
+   * complete(). Persisted accounts still fail closed and can ask the user to sign in again.
    */
   async credentialsExpired(): Promise<void> {}
   async credentialsRestored(_expiresAt?: Date): Promise<void> {}

@@ -18,7 +18,7 @@ import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
-import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
+import { CLOUDFLARE_VENDOR_ID, GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, loginCreatesConnectedAccount } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
@@ -665,12 +665,14 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
         { props: { pendingId: pendingId.toString(), vendorId } });
     // For most providers, sign-in needs only minimal scopes to verify the user's email (the grant is
-    // transient); capability scopes are requested later via an explicit connectAccount. Cloudflare is
-    // the exception: signing in with Cloudflare also links AI Gateway billing, so it requests and
-    // persists the billing-only scope set up front.
+    // transient); capability scopes are requested later via an explicit connectAccount. Providers
+    // that establish a lasting account during login request full scopes. Cloudflare remains billing
+    // only, so it deliberately asks for no gadget-facing resources.
     const options = vendorId === CLOUDFLARE_VENDOR_ID
       ? { scopes: "full" as const, resourceUrlPatterns: [] }
-      : { scopes: "auth" as const };
+      : loginCreatesConnectedAccount(vendorId)
+        ? { scopes: "full" as const }
+        : { scopes: "auth" as const };
     const { url } = await vendor.connectAccount(callback, options);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.

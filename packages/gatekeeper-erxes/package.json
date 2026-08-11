@@ -1,0 +1,22 @@
+{
+  "name": "@gadgets/erxes-gatekeeper",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/erxes.ts",
+  "scripts": {
+    "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
+    "deploy": "wrangler deploy",
+    "build": "tsc",
+    "types:check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/mcp-shared": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb-validate": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "wrangler": "catalog:"
+  }
+}
