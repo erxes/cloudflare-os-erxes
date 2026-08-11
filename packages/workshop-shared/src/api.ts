@@ -916,8 +916,9 @@ export type CloudflareAccountOption = {
   accountName: string;
 };
 
-// Supported AI providers.
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+/** Supported AI providers. */
+export type AiModelProvider =
+  "openai" | "anthropic" | "google" | "cloudflare" | "deepseek" | "kimi" | "ollama";
 
 // Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`.
 export type AiGatewayInfo = {
@@ -975,6 +976,10 @@ export const SUGGESTED_MODELS: Record<
     "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000},
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
   },
+  "deepseek": {
+    "deepseek-v4-flash": {name: "DeepSeek V4 Flash", contextWindow: 1000000, outputLimit: 384000},
+    "deepseek-v4-pro": {name: "DeepSeek V4 Pro", contextWindow: 1000000, outputLimit: 384000},
+  },
   "openai": {
     "gpt-5.6-sol": {name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000},
     "gpt-5.6-luna": {name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000},
@@ -982,6 +987,12 @@ export const SUGGESTED_MODELS: Record<
   },
   "google": {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
+  },
+  "kimi": {
+    "k3": {name: "Kimi K3", contextWindow: 1048576, outputLimit: 131072},
+    "kimi-for-coding": {
+      name: "Kimi K2.7 Code", contextWindow: 262144, outputLimit: 32768,
+    },
   },
   "ollama": {
   },

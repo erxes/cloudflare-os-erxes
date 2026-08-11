@@ -32,6 +32,12 @@ const WORKERS_AI_CONFIG: AiModelConfig = {
   apiToken: "ignored-in-gateway-mode",
 };
 
+const DEEPSEEK_CONFIG: AiModelConfig = {
+  provider: "deepseek",
+  model: "deepseek-v4-flash",
+  apiToken: "ignored-in-gateway-mode",
+};
+
 function env(overrides: Partial<Cloudflare.Env> = {}): Cloudflare.Env {
   return {
     CF_AI_GATEWAY: "platform-gateway",
@@ -123,6 +129,22 @@ describe("getModel AI Gateway routing", () => {
       apiToken: "gateway-token",
     });
   });
+
+  it("routes DeepSeek through its gateway endpoint", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY_PROVIDERS: "deepseek" }),
+        DEEPSEEK_CONFIG, INITIATOR);
+
+    expect(handle.model.api).toBe("openai-completions");
+    expect(handle.model.baseUrl).toBe(
+        "https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway/deepseek");
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe(
+        "https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway/deepseek/" +
+        "chat/completions");
+    expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
+    expect(request.headers.get("authorization")).toBeNull();
+  }, 15000);
 
   it("preserves gadget automation metadata", async () => {
     const handle = getModel(env(), ANTHROPIC_CONFIG, GADGET_INITIATOR, {

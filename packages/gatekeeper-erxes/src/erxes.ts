@@ -1,0 +1,662 @@
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
+import { createLogger } from "@gadgets/backend-utils/logger";
+import { MCP_BASE_TYPES } from "@gadgets/mcp-shared/base-types";
+import type { ConnectionAccount, McpConnection } from "@gadgets/mcp-shared/connection";
+import { McpFacetBase } from "@gadgets/mcp-shared/facet";
+import { fetchOptions } from "@gadgets/mcp-shared/fetch";
+import type { McpLogFields } from "@gadgets/mcp-shared/log";
+import { generateSessionTypes, sessionTypeName } from "@gadgets/mcp-shared/schema-to-ts";
+import { sameEndpoint, type ToolScope } from "@gadgets/mcp-shared/scope";
+import { McpSessionBase } from "@gadgets/mcp-shared/session";
+import ERXES_LOGO_SVG from "./erxes-logo.svg";
+import type { ClassifiedTool, ServerTrust } from "@gadgets/mcp-shared/tools";
+import { hostOf } from "@gadgets/mcp-shared/util";
+import {
+  stripTrailingSlashes,
+  type AccountDescription,
+  type Gatekeeper,
+  type GatekeeperConnectCallback,
+  type GatekeeperConnectOptions,
+  type GatekeeperUser,
+  type GatekeeperUserVerifier,
+  type GatekeeperVendor as GatekeeperVendorInterface,
+  type ResourceConfiguratorFrame,
+  type ResourceDescription,
+  type SupportedResource,
+  type VendorDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
+
+const LOGIN_LIFETIME_MS = 10 * 60 * 1000;
+const EXECUTOR_TOKEN_LIFETIME_SECONDS = 5 * 60;
+const VENDOR_ID = "erxes";
+const SERVER_ID = "executor";
+const SERVER_NAME = "Executor";
+const SCOPE: ToolScope = {};
+const TRUST: ServerTrust = "byo";
+const EXECUTOR_TYPES = `// Executor use in this erxes deployment.
+//
+// Do not inspect or enumerate this binding. Do not call listTools for an erxes request.
+// Call execute directly. executeCode only shows console output, so log the Executor RPC result:
+//   const result = await env.EXECUTOR.execute({ code: "return ..." });
+//   console.log(JSON.stringify(result));
+//
+// Inside Executor code, find erxes tools with:
+//   const { items } = await tools.search({ namespace: "erxes-officenext", query: "customer", limit: 12 });
+// Then inspect the chosen path with tools.describe.tool({ path }), call tools[path](input), and return
+// its result. The tools object is a lazy proxy and cannot be enumerated.
+
+${MCP_BASE_TYPES}`;
+const LOGO = {
+  url: `data:image/svg+xml,${encodeURIComponent(ERXES_LOGO_SVG)}`,
+};
+
+const logger = createLogger<McpLogFields>({
+  component: "gatekeeper.erxes",
+  vendorId: VENDOR_ID,
+});
+
+type LoginNonce = {
+  value: string;
+  expiresAt: number;
+  claimed: boolean;
+};
+
+type LoginResult = { ok: true } | { ok: false; error: string };
+type ErxesUserProps = { accountId: string };
+
+type ErxesIdentity = {
+  userId: string;
+  email: string;
+  tenant: string;
+};
+
+type ExecutorGatekeeperProps = {
+  accountId: string;
+  endpoint: string;
+  serverName: string;
+  scope: ToolScope;
+};
+
+type GraphQlResponse<T> = {
+  data?: T;
+  errors?: { message?: string }[];
+};
+
+function getBaseUrl(env: Env) {
+  return stripTrailingSlashes(env.BASE_URL ?? "http://localhost:8787/gatekeeper/erxes");
+}
+
+function secureUrl(raw: string | undefined, name: string, allowInsecure: boolean) {
+  const value = raw?.trim();
+  if (!value) throw new Error(`${name} is not configured.`);
+
+  const url = new URL(value);
+  if (url.protocol !== "https:" && !(allowInsecure && url.protocol === "http:")) {
+    throw new Error(`${name} must use HTTPS.`);
+  }
+  if (url.username || url.password) throw new Error(`${name} must not contain credentials.`);
+  url.hash = "";
+  return url;
+}
+
+function getGraphQlUrl(env: Env) {
+  return secureUrl(
+    env.ERXES_GRAPHQL_URL,
+    "ERXES_GRAPHQL_URL",
+    env.ERXES_ALLOW_INSECURE === "true",
+  ).toString();
+}
+
+function getExecutorUrl(env: Env) {
+  const url = secureUrl(env.EXECUTOR_URL, "EXECUTOR_URL", fetchOptions(env).allowInsecure === true);
+  return stripTrailingSlashes(url.toString());
+}
+
+function executorMcpUrl(env: Env) {
+  return `${getExecutorUrl(env)}/os/mcp?elicitation_mode=browser`;
+}
+
+function executorSecret(env: Env) {
+  const secret = env.EXECUTOR_AUTH_SECRET?.trim();
+  if (!secret || secret.length < 32) {
+    throw new Error("EXECUTOR_AUTH_SECRET must be at least 32 characters.");
+  }
+  return secret;
+}
+
+function nonce() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+function constantTimeEqual(left: string, right: string) {
+  const length = Math.max(left.length, right.length);
+  let difference = left.length ^ right.length;
+  for (let index = 0; index < length; index++) {
+    difference |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
+  }
+  return difference === 0;
+}
+
+function base64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function encodeJson(value: object) {
+  return base64Url(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+async function executorToken(env: Env, identity: ErxesIdentity) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = encodeJson({ alg: "HS256", typ: "JWT" });
+  const payload = encodeJson({
+    iss: "cloudflare-os",
+    aud: "executor",
+    sub: identity.userId,
+    org: identity.tenant,
+    email: identity.email,
+    iat: now,
+    exp: now + EXECUTOR_TOKEN_LIFETIME_SECONDS,
+  });
+  const unsigned = `${header}.${payload}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(executorSecret(env)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(unsigned));
+  return `${unsigned}.${base64Url(new Uint8Array(signature))}`;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function loginPage(action: string, error?: string) {
+  const errorHtml = error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in with erxes</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }
+    main { width: min(360px, calc(100vw - 32px)); }
+    .logo { width: 28px; height: 40px; margin-bottom: 20px; }
+    .logo svg { display: block; width: 100%; height: 100%; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    p { margin: 0 0 20px; color: GrayText; }
+    label { display: grid; gap: 6px; margin: 14px 0; font-weight: 600; }
+    input, button { box-sizing: border-box; width: 100%; min-height: 44px; border-radius: 8px; font: inherit; }
+    input { border: 1px solid GrayText; padding: 10px 12px; background: Field; color: FieldText; }
+    button { margin-top: 8px; border: 0; padding: 10px 14px; background: #4f46e5; color: white; font-weight: 700; cursor: pointer; }
+    .error { color: #c53030; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="logo" aria-hidden="true">${ERXES_LOGO_SVG}</div>
+    <h1>Sign in with erxes</h1>
+    <p>Signing in also connects erxes to Executor for agent use.</p>
+    ${errorHtml}
+    <form method="post" action="${escapeHtml(action)}">
+      <label>Email<input name="email" type="email" autocomplete="username" required autofocus></label>
+      <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Continue</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
+const CLOSE_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Signed in</title></head>
+<body><p>Signed in. You can close this window.</p><script>window.close()</script></body></html>`;
+
+function html(body: string, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Security-Policy":
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+async function graphql<T>(url: string, body: object, cookie?: string) {
+  const response = await fetch(url, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "Content-Type": "application/json",
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json<GraphQlResponse<T>>();
+  return { response, result };
+}
+
+async function authenticate(env: Env, email: string, password: string) {
+  const url = getGraphQlUrl(env);
+  const login = await graphql<{ login: string }>(url, {
+    operationName: "erxesOsLogin",
+    query:
+      "mutation erxesOsLogin($email: String!, $password: String!) { login(email: $email, password: $password) }",
+    variables: { email, password },
+  });
+  if (
+    !login.response.ok ||
+    login.result.errors?.length ||
+    login.result.data?.login !== "loggedIn"
+  ) {
+    return null;
+  }
+
+  const setCookie = login.response.headers.get("set-cookie") ?? "";
+  const token = /(?:^|[,;]\s*)auth-token=([^;,\s]+)/.exec(setCookie)?.[1];
+  if (!token) throw new Error("erxes did not return an auth cookie.");
+
+  const cookie = `auth-token=${token}`;
+  const currentUser = await graphql<{
+    currentUser: { _id?: string | null; email?: string | null } | null;
+  }>(
+    url,
+    {
+      operationName: "erxesOsCurrentUser",
+      query: "query erxesOsCurrentUser { currentUser { _id email } }",
+    },
+    cookie,
+  );
+  const user = currentUser.result.data?.currentUser;
+  if (!currentUser.response.ok || currentUser.result.errors?.length || !user?._id || !user.email) {
+    return null;
+  }
+
+  return {
+    identity: {
+      userId: user._id,
+      email: user.email.trim().toLowerCase(),
+      tenant: new URL(url).host.toLowerCase(),
+    },
+    cookie,
+  };
+}
+
+async function provisionExecutor(env: Env, identity: ErxesIdentity, cookie: string) {
+  const response = await fetch(`${getExecutorUrl(env)}/os/provision`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      Authorization: `Bearer ${await executorToken(env, identity)}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ endpoint: getGraphQlUrl(env), cookie }),
+  });
+  if (!response.ok) throw new Error(`Executor provisioning failed with status ${response.status}.`);
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const url = new URL(request.url);
+    const baseUrl = new URL(getBaseUrl(env));
+    const prefix = baseUrl.pathname;
+    if (!url.pathname.startsWith(`${prefix}/`)) return new Response("Not Found", { status: 404 });
+
+    const parts = url.pathname.slice(prefix.length + 1).split("/");
+    if (parts.length !== 2) return new Response("Not Found", { status: 404 });
+
+    let account: DurableObjectStub<ErxesLoginAccount>;
+    try {
+      account = ctx.exports.ErxesLoginAccount.get(
+        ctx.exports.ErxesLoginAccount.idFromString(parts[0]),
+      );
+    } catch {
+      return html(loginPage(url.pathname, "This sign-in link is invalid."), 400);
+    }
+
+    if (request.method === "GET") {
+      if (!(await account.canUse(parts[1]))) {
+        return html(loginPage(url.pathname, "This sign-in link has expired."), 400);
+      }
+      return html(loginPage(url.pathname));
+    }
+    if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    const form = await request.formData();
+    const email = String(form.get("email") ?? "").trim();
+    const password = String(form.get("password") ?? "");
+    if (!email || !password) {
+      return html(loginPage(url.pathname, "Enter your email and password."), 400);
+    }
+
+    const result = await account.login(parts[1], email, password);
+    if (!result.ok) return html(loginPage(url.pathname, result.error), 401);
+    return html(CLOSE_PAGE);
+  },
+};
+
+@validateRpc()
+export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorInterface {
+  async describe(): Promise<VendorDescription> {
+    return {
+      displayName: "erxes",
+      url: "https://officenext.erxes.io/",
+      logo: LOGO,
+      color: "#4f46e5",
+      tagline: "Sign in and use erxes through Executor",
+      description:
+        "Sign in with your erxes account. The same sign-in connects your erxes data " +
+        "to your private Executor account for agent use.",
+      providesAuth: true,
+    };
+  }
+
+  async connectAccount(
+    callback: Fetcher<GatekeeperConnectCallback>,
+    _options?: GatekeeperConnectOptions,
+  ) {
+    getGraphQlUrl(this.env);
+    getExecutorUrl(this.env);
+    executorSecret(this.env);
+    const accountId = this.ctx.exports.ErxesLoginAccount.newUniqueId();
+    const initiationNonce = nonce();
+    await this.ctx.exports.ErxesLoginAccount.get(accountId).begin(callback, initiationNonce);
+    return { url: `${getBaseUrl(this.env)}/${accountId}/${initiationNonce}` };
+  }
+
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return [];
+  }
+
+  async getTypeScriptTypes() {
+    return EXECUTOR_TYPES;
+  }
+}
+
+export class ErxesLoginAccount extends DurableObject<Env> {
+  async begin(callback: Fetcher<GatekeeperConnectCallback>, value: string) {
+    this.ctx.storage.kv.put("callback", callback);
+    this.ctx.storage.kv.put<LoginNonce>("nonce", {
+      value,
+      expiresAt: Date.now() + LOGIN_LIFETIME_MS,
+      claimed: false,
+    });
+    await this.ctx.storage.setAlarm(Date.now() + LOGIN_LIFETIME_MS);
+  }
+
+  async canUse(value: string) {
+    const stored = this.ctx.storage.kv.get<LoginNonce>("nonce");
+    return (
+      stored !== undefined &&
+      !stored.claimed &&
+      Date.now() < stored.expiresAt &&
+      constantTimeEqual(stored.value, value)
+    );
+  }
+
+  async login(value: string, email: string, password: string): Promise<LoginResult> {
+    const stored = this.ctx.storage.kv.get<LoginNonce>("nonce");
+    if (
+      !stored ||
+      stored.claimed ||
+      Date.now() >= stored.expiresAt ||
+      !constantTimeEqual(stored.value, value)
+    ) {
+      return { ok: false, error: "This sign-in link has expired." };
+    }
+    this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: true });
+
+    try {
+      const authenticated = await authenticate(this.env, email, password);
+      if (!authenticated) {
+        this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false });
+        return { ok: false, error: "Email or password is incorrect." };
+      }
+
+      await provisionExecutor(this.env, authenticated.identity, authenticated.cookie);
+      const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+      if (!callback) return { ok: false, error: "This sign-in link has expired." };
+
+      const accountId = this.ctx.exports.ErxesLoginAccount.idFromName(
+        `${authenticated.identity.tenant}:${authenticated.identity.userId}`,
+      );
+      await this.ctx.exports.ErxesLoginAccount.get(accountId).activate(
+        authenticated.identity,
+        callback,
+      );
+      await callback.complete(
+        this.ctx.exports.ErxesUser({ props: { accountId: accountId.toString() } }),
+      );
+      await this.ctx.storage.deleteAll();
+      return { ok: true };
+    } catch (error) {
+      logger.warn("erxes sign-in failed", { event: "auth.login.failed", error });
+      this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false });
+      return { ok: false, error: "erxes sign-in is unavailable. Try again." };
+    }
+  }
+
+  activate(identity: ErxesIdentity, callback: Fetcher<GatekeeperConnectCallback>) {
+    this.ctx.storage.kv.put("identity", identity);
+    this.ctx.storage.kv.put("callback", callback);
+    this.ctx.storage.kv.put("credentialsExpired", false);
+  }
+
+  identity() {
+    return this.ctx.storage.kv.get<ErxesIdentity>("identity") ?? null;
+  }
+
+  async connection(endpoint: string) {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      throw new Error("Sign in to erxes again.");
+    }
+    const expected = executorMcpUrl(this.env);
+    if (!sameEndpoint(endpoint, expected)) {
+      throw new Error("Executor configuration changed. Start a new Gadget session.");
+    }
+    return executorToken(this.env, identity);
+  }
+
+  async executorCredentialsExpired() {
+    this.ctx.storage.kv.put("credentialsExpired", true);
+    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (callback) await callback.credentialsExpired();
+  }
+
+  async revoke() {
+    await this.ctx.storage.deleteAll();
+  }
+
+  async alarm() {
+    if (!this.identity()) await this.ctx.storage.deleteAll();
+  }
+}
+
+@validateRpc()
+export class ErxesUser extends WorkerEntrypoint<Env, ErxesUserProps> implements GatekeeperUser {
+  #account() {
+    return this.ctx.exports.ErxesLoginAccount.get(
+      this.ctx.exports.ErxesLoginAccount.idFromString(this.ctx.props.accountId),
+    );
+  }
+
+  async describe(): Promise<AccountDescription> {
+    const identity = await this.#account().identity();
+    if (!identity) throw new Error("Sign in to erxes again.");
+    return {
+      displayName: identity.email,
+      uniqueName: `${identity.tenant}:${identity.userId}`,
+      avatar: LOGO,
+      singleton: { tsType: sessionTypeName(SERVER_ID, executorMcpUrl(this.env)) },
+    };
+  }
+
+  async getAuthenticatedEmail() {
+    return (await this.#account().identity())?.email ?? null;
+  }
+
+  async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<unknown>>> {
+    return this.ctx.exports.ExecutorGatekeeper({
+      props: {
+        accountId: this.ctx.props.accountId,
+        endpoint: executorMcpUrl(this.env),
+        serverName: SERVER_NAME,
+        scope: SCOPE,
+      },
+    });
+  }
+
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return [];
+  }
+
+  getGatekeeperClassFor(_url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<unknown>>;
+    resource: SupportedResource;
+  }> {
+    throw new Error("Executor is an automatic agent capability, not a URL resource.");
+  }
+
+  startResourceConfigurator(_resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    throw new Error("Executor has no resource form.");
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]) {
+    return {};
+  }
+
+  async revoke() {
+    await this.#account().revoke();
+  }
+
+  reconnect(): Promise<{ url: string }> {
+    throw new Error("Sign in to erxes again.");
+  }
+
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    return this.ctx.exports.ErxesVerifier({});
+  }
+}
+
+@validateRpc()
+export class ErxesVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
+  verify(): void {}
+}
+
+export class ExecutorGatekeeper
+  extends McpFacetBase<Env, ExecutorGatekeeperProps, ExecutorSession>
+  implements ConnectionAccount
+{
+  protected get log() {
+    return logger.with({ serverHost: hostOf(this.ctx.props.endpoint) });
+  }
+
+  protected get trust(): ServerTrust {
+    return TRUST;
+  }
+
+  protected get sessionClass() {
+    return ExecutorSession;
+  }
+
+  protected get actionScopeTag() {
+    return `executor:${this.ctx.props.accountId}`;
+  }
+
+  // Executor applies its per-user policy to every inner tool call. Avoid a second approval around
+  // these wrapper calls.
+  async tools(): Promise<ClassifiedTool[]> {
+    return (await super.tools()).map(entry => ({
+      ...entry,
+      mode: "read",
+      autoApprovable: false,
+      classifiedBy: "default",
+    }));
+  }
+
+  protected get observerName() {
+    return this.ctx.props.serverName;
+  }
+
+  protected account(): ConnectionAccount {
+    return this;
+  }
+
+  get serverName() {
+    return this.ctx.props.serverName;
+  }
+
+  #loginAccount() {
+    return this.ctx.exports.ErxesLoginAccount.get(
+      this.ctx.exports.ErxesLoginAccount.idFromString(this.ctx.props.accountId),
+    );
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    const tools = await this.tools();
+    return {
+      url: this.ctx.props.endpoint,
+      title: this.ctx.props.serverName,
+      snippet: `${tools.length} Executor tools for your erxes account.`,
+      suggestedBindingName: "EXECUTOR",
+      tsType: sessionTypeName(SERVER_ID, this.ctx.props.endpoint),
+    };
+  }
+
+  async getTypeScriptTypes() {
+    return generateSessionTypes({
+      baseTypes: EXECUTOR_TYPES,
+      serverId: SERVER_ID,
+      serverName: this.ctx.props.serverName,
+      endpoint: this.ctx.props.endpoint,
+      discriminator: this.ctx.props.endpoint,
+      trust: TRUST,
+      tools: await this.tools(),
+    });
+  }
+
+  async getConnection(endpoint: string): Promise<McpConnection> {
+    return {
+      authorization: await this.#loginAccount().connection(endpoint),
+      sessionId: this.ctx.storage.kv.get<string>("mcpSessionId") ?? null,
+      generation: 0,
+    };
+  }
+
+  async setMcpSessionId(endpoint: string, generation: number, sessionId: string | null) {
+    if (generation !== 0 || !sameEndpoint(endpoint, this.ctx.props.endpoint)) return;
+    if (sessionId) this.ctx.storage.kv.put("mcpSessionId", sessionId);
+    else this.ctx.storage.kv.delete("mcpSessionId");
+  }
+
+  async noteCredentialsExpired(endpoint: string, generation: number) {
+    if (generation !== 0 || !sameEndpoint(endpoint, this.ctx.props.endpoint)) return;
+    this.ctx.storage.kv.delete("mcpSessionId");
+    await this.#loginAccount().executorCredentialsExpired();
+    this.log.warn("Executor rejected the erxes account", {
+      event: "executor.credentials.rejected",
+    });
+  }
+}
+
+@validateRpc()
+class ExecutorSession extends McpSessionBase {}

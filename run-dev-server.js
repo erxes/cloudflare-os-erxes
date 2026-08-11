@@ -187,6 +187,10 @@ const SHARED_GATEKEEPER_CREDS = {
 // `.dev.vars` is gitignored, so it cannot leave the machine. Secrets travel the same way
 // `CLIENT_SECRET` already does, via SHARED_GATEKEEPER_CREDS above.
 const PASSTHROUGH_GATEKEEPER_VARS = {
+  "gatekeeper-erxes": [
+    "ERXES_GRAPHQL_URL", "ERXES_ALLOW_INSECURE", "EXECUTOR_URL", "EXECUTOR_AUTH_SECRET",
+    "MCP_ALLOW_INSECURE",
+  ],
   "gatekeeper-mcp-portal": [
     "MCP_PORTAL_URL", "MCP_PORTAL_NAME", "MCP_PORTAL_AUTH", "MCP_PORTAL_TOKEN",
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_ALLOW_INSECURE",
