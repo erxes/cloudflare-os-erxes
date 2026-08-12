@@ -60,7 +60,24 @@ type LoginNonce = {
   value: string;
   expiresAt: number;
   claimed: boolean;
+  completed?: boolean;
 };
+
+type NonceStatus =
+  | { kind: "ok"; nonce: LoginNonce }
+  | { kind: "completed" }
+  | { kind: "dead" };
+
+// The link is "dead" only when it is invalid, expired, or gone. A claim (another submit in
+// flight) or a completed sign-in is not dead — answering those with "expired" is how a correct
+// submission used to show the error while the real login still connected the account.
+function nonceStatus(stored: LoginNonce | undefined, value: string): NonceStatus {
+  if (!stored || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, value)) {
+    return { kind: "dead" };
+  }
+  if (stored.completed) return { kind: "completed" };
+  return { kind: "ok", nonce: stored };
+}
 
 type LoginResult = { ok: true } | { ok: false; error: string };
 type ErxesUserProps = { accountId: string };
@@ -332,7 +349,9 @@ export default {
     }
 
     if (request.method === "GET") {
-      if (!(await account.canUse(parts[1]))) {
+      const status = await account.nonceStatus(parts[1]);
+      if (status.kind === "completed") return html(CLOSE_PAGE);
+      if (status.kind === "dead") {
         return html(loginPage(url.pathname, "This sign-in link has expired."), 400);
       }
       return html(loginPage(url.pathname));
@@ -401,25 +420,19 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + LOGIN_LIFETIME_MS);
   }
 
-  async canUse(value: string) {
-    const stored = this.ctx.storage.kv.get<LoginNonce>("nonce");
-    return (
-      stored !== undefined &&
-      !stored.claimed &&
-      Date.now() < stored.expiresAt &&
-      constantTimeEqual(stored.value, value)
-    );
+  async nonceStatus(value: string): Promise<NonceStatus> {
+    return nonceStatus(this.ctx.storage.kv.get<LoginNonce>("nonce"), value);
   }
 
   async login(value: string, email: string, password: string): Promise<LoginResult> {
-    const stored = this.ctx.storage.kv.get<LoginNonce>("nonce");
-    if (
-      !stored ||
-      stored.claimed ||
-      Date.now() >= stored.expiresAt ||
-      !constantTimeEqual(stored.value, value)
-    ) {
-      return { ok: false, error: "This sign-in link has expired." };
+    const status = nonceStatus(this.ctx.storage.kv.get<LoginNonce>("nonce"), value);
+    if (status.kind === "dead") return { ok: false, error: "This sign-in link has expired." };
+    // The link already signed someone in (a duplicate submit landed after completion) — the
+    // connection is done, so answer success instead of a misleading "expired".
+    if (status.kind === "completed") return { ok: true };
+    const stored = status.nonce;
+    if (stored.claimed) {
+      return { ok: false, error: "Sign-in is already in progress. Please wait and try again." };
     }
     this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: true });
 
@@ -444,7 +457,9 @@ export class ErxesLoginAccount extends DurableObject<Env> {
       await callback.complete(
         this.ctx.exports.ErxesUser({ props: { accountId: accountId.toString() } }),
       );
-      await this.ctx.storage.deleteAll();
+      // Keep the nonce (marked completed) so a duplicate submit answers "already signed in"
+      // instead of "expired"; the alarm cleans up at the end of the link's lifetime.
+      this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false, completed: true });
       return { ok: true };
     } catch (error) {
       logger.warn("erxes sign-in failed", { event: "auth.login.failed", error });
