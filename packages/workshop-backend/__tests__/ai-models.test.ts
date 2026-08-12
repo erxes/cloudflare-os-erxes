@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
 
@@ -70,6 +70,89 @@ async function captureRequest(handle: ModelHandle): Promise<CapturedRequest> {
   expect(capturedRequests.length).toBeGreaterThan(0);
   return capturedRequests[0];
 }
+
+describe("transient provider failures", () => {
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const STREAMED_REPLY =
+      'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":0,' +
+      '"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{' +
+      '"content":"hello from deepseek"},"finish_reason":null}]}\n\n' +
+      'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":0,' +
+      '"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},' +
+      '"finish_reason":"stop"}]}\n\n' +
+      "data: [DONE]\n\n";
+
+  function sseResponse(): Response {
+    return new Response(STREAMED_REPLY, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
+  it("retries transient 503 overloads before the model gets to answer", async () => {
+    let attempts = 0;
+    const flakyFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input as RequestInfo, init);
+      capturedRequests.push({
+        url: request.url,
+        headers: request.headers,
+        body: await request.text(),
+      });
+      attempts++;
+      return attempts <= 2
+          ? Response.json({ error: { message: "server overloaded" } }, { status: 503 })
+          : sseResponse();
+    }) as typeof fetch;
+
+    const handle = getModel(env({ CF_AI_GATEWAY_PROVIDERS: "deepseek" }),
+        DEEPSEEK_CONFIG, INITIATOR);
+    const stream = handle.stream(handle.model, {
+      messages: [{ role: "user", content: "hi", timestamp: 0 }],
+    }, { fetch: flakyFetch });
+    const message = await stream.result();
+
+    // Two 503s, then success: the default MODEL_RETRY_COUNT (2) engaged pi's retry loop.
+    expect(attempts).toBe(3);
+    expect(message.stopReason).toBe("stop");
+    expect(message.content
+        .flatMap((block) => block.type === "text" ? [block.text] : [])
+        .join("")).toBe("hello from deepseek");
+  }, 15000);
+
+  it("aborts a stalled request instead of hanging the turn", async () => {
+    // A provider that accepts the connection and then never sends a byte (overload behavior):
+    // no HTTP response, no SSE events. Only the stall guard's abort can end the request.
+    const hangingFetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+            reject(new Error("aborted")), { once: true });
+      })) as typeof fetch;
+
+    const handle = getModel(env({ CF_AI_GATEWAY_PROVIDERS: "deepseek" }),
+        DEEPSEEK_CONFIG, INITIATOR);
+
+    // Fake timers must be active before the stream arms its stall timer.
+    vi.useFakeTimers();
+    const stream = handle.stream(handle.model, {
+      messages: [{ role: "user", content: "hi", timestamp: 0 }],
+    }, { fetch: hangingFetch });
+
+    const resultPromise = stream.result();
+    await vi.advanceTimersByTimeAsync(3 * 60 * 1000 + 1);
+    const message = await resultPromise;
+
+    // The turn settles with a clear error (stopReason "aborted") instead of hanging forever,
+    // so chatMeta.activeAgent is cleared and retry/send work again.
+    expect(message.stopReason).toBe("aborted");
+    expect(message.errorMessage).toContain("stalled");
+  }, 15000);
+});
 
 describe("getModel AI Gateway routing", () => {
   beforeEach(() => {

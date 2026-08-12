@@ -1,5 +1,6 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type {
   AnthropicMessagesCompat, Api, AssistantMessageEventStream, Context, Model, ModelCost,
   OpenAICompletionsCompat, ProviderHeaders, SimpleStreamOptions, StreamFunction,
@@ -293,6 +294,58 @@ type HandleArgs = {
   aiGatewayLogRoute?: AiGatewayLogRoute;
 };
 
+// Retry transient provider failures (429/rate-limit, 5xx incl. DeepSeek's 503 overload) with
+// pi's interruptible exponential backoff. The SDK default is zero retries, so a brief overload
+// would otherwise fail the whole turn instead of recovering.
+const MODEL_RETRY_COUNT = 2;
+
+// Abort a model request that stalls. The provider SDKs' own request timeout covers only the wait
+// for response headers (cleared the moment the response starts), and pi reads the SSE body with
+// no timeout, so an overloaded provider that accepts the connection then goes silent would
+// otherwise hang the agent turn forever -- leaving chatMeta.activeAgent set and blocking retry
+// and message send. The timer resets on every stream event, so slow-but-alive streams (long
+// reasoning) are unaffected.
+const MODEL_STREAM_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
+const MODEL_STREAM_STALLED_MESSAGE =
+    "The model request stalled (no response for 3 minutes). Try again.";
+
+// Relay a pi stream through a resettable idle timer. When no event arrives for `idleMs`, call
+// `onStall` (the caller aborts the request) and rewrite the terminal error with the stall
+// message. Returns a fresh AssistantMessageEventStream so `.result()` and async iteration behave
+// exactly as they do on the original.
+function withStallGuard(source: AssistantMessageEventStream, idleMs: number,
+                        onStall: () => void): AssistantMessageEventStream {
+  const guarded = createAssistantMessageEventStream();
+  let stalled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    timer = setTimeout(() => {
+      timer = undefined;
+      stalled = true;
+      onStall();
+    }, idleMs);
+  };
+  arm();
+  void (async () => {
+    try {
+      for await (const event of source) {
+        clearTimeout(timer);
+        arm();
+        guarded.push(stalled && event.type === "error"
+            ? { ...event, error: { ...event.error, errorMessage: MODEL_STREAM_STALLED_MESSAGE } }
+            : event);
+      }
+      guarded.end(await source.result());
+    } catch {
+      // The producer died without a terminal event; close the guard so result() still settles.
+      guarded.end();
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  })();
+  return guarded;
+}
+
 function makeHandle(args: HandleArgs): ModelHandle {
   const streamFn = API_STREAMS[args.model.api];
   if (!streamFn) {
@@ -329,6 +382,18 @@ function makeHandle(args: HandleArgs): ModelHandle {
             ? { "cf-aig-metadata": JSON.stringify(args.gatewayMetadata) }
             : {}),
       };
+      // Compose the caller's signal with a controller the stall guard can abort, so a request
+      // that stops producing events is cut off even though the caller's own signal never fires.
+      const stallController = new AbortController();
+      const callerSignal = options.signal;
+      if (callerSignal) {
+        if (callerSignal.aborted) {
+          stallController.abort(callerSignal.reason);
+        } else {
+          callerSignal.addEventListener(
+              "abort", () => stallController.abort(callerSignal.reason), { once: true });
+        }
+      }
       const merged: SimpleStreamOptions = {
         // API defaults first, so an explicit per-call option can override them. `thinking: false`
         // replaces them with an explicit thinking-off request: for Anthropic pi sends
@@ -341,6 +406,12 @@ function makeHandle(args: HandleArgs): ModelHandle {
         ...options,
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        // Retry transient provider failures (429/rate-limit, 5xx incl. DeepSeek's 503 overload)
+        // with pi's interruptible exponential backoff; the SDK default is zero retries.
+        maxRetries: options.maxRetries ?? MODEL_RETRY_COUNT,
+        // Overrides `...options` above: the request must abort when either the caller or the
+        // stall guard fires.
+        signal: stallController.signal,
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
         sessionId: options.sessionId ?? args.sessionAffinity,
         onResponse: async (response, responseModel) => {
@@ -360,7 +431,10 @@ function makeHandle(args: HandleArgs): ModelHandle {
         // If Workers-binding-backed inference returns (upstream ask filed), inject a
         // fetch-to-binding shim here and relax the token requirements in ai-gateway.ts.
       };
-      return streamFn(model, context, merged);
+      const events = streamFn(model, context, merged);
+      return withStallGuard(events, MODEL_STREAM_IDLE_TIMEOUT_MS, () => {
+        stallController.abort(new Error(MODEL_STREAM_STALLED_MESSAGE));
+      });
     },
   };
   return handle;
