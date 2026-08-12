@@ -80,6 +80,11 @@ function nonceStatus(stored: LoginNonce | undefined, value: string): NonceStatus
 }
 
 type LoginResult = { ok: true } | { ok: false; error: string };
+
+// Returned by login() when a concurrent submit already claimed the link; the fetch handler
+// converts it into the self-resolving waiting page rather than surfacing it as an error.
+const SIGN_IN_IN_PROGRESS_MESSAGE =
+    "Sign-in is already in progress. Please wait and try again.";
 type ErxesUserProps = { accountId: string };
 
 type ErxesIdentity = {
@@ -242,6 +247,65 @@ function loginPage(action: string, error?: string) {
 const CLOSE_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Signed in</title></head>
 <body><p>Signed in. You can close this window.</p><script>window.close()</script></body></html>`;
 
+// Shown while another submit is completing this sign-in (double-click, refresh re-POST, or the
+// same link open in another tab). Polls the link's JSON status and reloads when the state leaves
+// "claimed" — the normal GET handler then renders the form, the expired page, or the close page
+// as appropriate, so the window resolves itself instead of dead-ending on a 401.
+const WAITING_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Signing in</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }
+    main { width: min(360px, calc(100vw - 32px)); text-align: center; }
+    .spinner { width: 28px; height: 28px; margin: 0 auto 16px; border-radius: 50%;
+      border: 3px solid color-mix(in srgb, CanvasText 20%, transparent);
+      border-top-color: #4f46e5; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    p { margin: 0 0 8px; font-size: 16px; }
+    small { color: GrayText; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="spinner" aria-hidden="true"></div>
+    <p>Sign-in is already in progress.</p>
+    <small>This window will finish by itself once the other sign-in completes.</small>
+  </main>
+  <script>
+    const waitUrl = location.pathname +
+        (location.search ? location.search + "&" : "?") + "wait=1";
+    (async () => {
+      for (;;) {
+        await new Promise(r => setTimeout(r, 1000));
+        let status;
+        try {
+          status = (await (await fetch(waitUrl, { cache: "no-store" })).json()).status;
+        } catch {
+          continue;
+        }
+        if (status !== "claimed") { location.reload(); return; }
+      }
+    })();
+  </script>
+</body>
+</html>`;
+
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
 function html(body: string, status = 200) {
   return new Response(body, {
     status,
@@ -249,7 +313,8 @@ function html(body: string, status = 200) {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Content-Security-Policy":
-        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'",
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
+        "connect-src 'self'; form-action 'self'",
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
     },
@@ -350,13 +415,31 @@ export default {
 
     if (request.method === "GET") {
       const status = await account.nonceStatus(parts[1]);
+      // Poll endpoint for the waiting page: JSON status instead of HTML.
+      if (url.searchParams.has("wait")) {
+        return json({
+          status: status.kind === "ok" && status.nonce.claimed ? "claimed" : status.kind,
+        });
+      }
       if (status.kind === "completed") return html(CLOSE_PAGE);
       if (status.kind === "dead") {
         return html(loginPage(url.pathname, "This sign-in link has expired."), 400);
       }
+      // A sign-in is mid-flight on this link (e.g. it was opened in another tab): wait for it
+      // to settle instead of showing a stale form that would just bounce back.
+      if (status.kind === "ok" && status.nonce.claimed) return html(WAITING_PAGE);
       return html(loginPage(url.pathname));
     }
     if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
+
+    // A concurrent submit (double-click, refresh re-POST, same link elsewhere) is already
+    // completing this sign-in: show the self-resolving waiting page instead of a 401.
+    const postStatus = await account.nonceStatus(parts[1]);
+    if (postStatus.kind === "dead") {
+      return html(loginPage(url.pathname, "This sign-in link has expired."), 400);
+    }
+    if (postStatus.kind === "completed") return html(CLOSE_PAGE);
+    if (postStatus.kind === "ok" && postStatus.nonce.claimed) return html(WAITING_PAGE);
 
     const form = await request.formData();
     const email = String(form.get("email") ?? "").trim();
@@ -366,7 +449,12 @@ export default {
     }
 
     const result = await account.login(parts[1], email, password);
-    if (!result.ok) return html(loginPage(url.pathname, result.error), 401);
+    if (!result.ok) {
+      // The link was claimed between our check above and login() (the form parse awaits): same
+      // story, show the waiting page.
+      if (result.error === SIGN_IN_IN_PROGRESS_MESSAGE) return html(WAITING_PAGE);
+      return html(loginPage(url.pathname, result.error), 401);
+    }
     return html(CLOSE_PAGE);
   },
 };
@@ -432,7 +520,7 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     if (status.kind === "completed") return { ok: true };
     const stored = status.nonce;
     if (stored.claimed) {
-      return { ok: false, error: "Sign-in is already in progress. Please wait and try again." };
+      return { ok: false, error: SIGN_IN_IN_PROGRESS_MESSAGE };
     }
     this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: true });
 
