@@ -384,6 +384,52 @@ async function authenticate(env: Env, email: string, password: string) {
   };
 }
 
+/**
+ * Passwordless variant: redeems a single-use connect code with the erxes backend, which returns
+ * a session token for the already-authenticated dashboard user. The currentUser round-trip both
+ * verifies the token actually works and resolves the identity the same way password sign-in does.
+ */
+async function authenticateWithCode(env: Env, code: string) {
+  const exchangeUrl = env.CF_OS_EXCHANGE_URL;
+  const exchangeSecret = env.CF_OS_EXCHANGE_SECRET;
+  if (!exchangeUrl || !exchangeSecret) throw new Error("Connect-code exchange is not configured.");
+
+  const response = await fetch(exchangeUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-cf-os-secret": exchangeSecret },
+    body: JSON.stringify({ code }),
+  });
+  if (!response.ok) return null;
+  const exchanged = (await response.json()) as { authToken?: string };
+  if (!exchanged.authToken) return null;
+
+  const cookie = `auth-token=${exchanged.authToken}`;
+  const url = getGraphQlUrl(env);
+  const currentUser = await graphql<{
+    currentUser: { _id?: string | null; email?: string | null } | null;
+  }>(
+    url,
+    {
+      operationName: "erxesOsCurrentUser",
+      query: "query erxesOsCurrentUser { currentUser { _id email } }",
+    },
+    cookie,
+  );
+  const user = currentUser.result.data?.currentUser;
+  if (!currentUser.response.ok || currentUser.result.errors?.length || !user?._id || !user.email) {
+    return null;
+  }
+
+  return {
+    identity: {
+      userId: user._id,
+      email: user.email.trim().toLowerCase(),
+      tenant: new URL(url).host.toLowerCase(),
+    },
+    cookie,
+  };
+}
+
 async function provisionExecutor(env: Env, identity: ErxesIdentity, cookie: string) {
   const response = await fetch(`${getExecutorUrl(env)}/os/provision`, {
     method: "POST",
@@ -431,6 +477,14 @@ export default {
       // A sign-in is mid-flight on this link (e.g. it was opened in another tab): wait for it
       // to settle instead of showing a stale form that would just bounce back.
       if (status.kind === "ok" && status.nonce.claimed) return html(WAITING_PAGE);
+      // Dashboard-embedded sign-ins arrive with a single-use connect code: skip the password
+      // form. A failed redemption falls back to the normal form so the user is never stuck.
+      const connectCode = url.searchParams.get("code");
+      if (connectCode && status.kind === "ok") {
+        const result = await account.loginWithCode(parts[1], connectCode);
+        if (result.ok) return html(CLOSE_PAGE);
+        return html(loginPage(url.pathname, result.error));
+      }
       return html(loginPage(url.pathname));
     }
     if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
@@ -488,7 +542,13 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     const accountId = this.ctx.exports.ErxesLoginAccount.newUniqueId();
     const initiationNonce = nonce();
     await this.ctx.exports.ErxesLoginAccount.get(accountId).begin(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${accountId}/${initiationNonce}` };
+    let url = `${getBaseUrl(this.env)}/${accountId}/${initiationNonce}`;
+    // Dashboard-embedded sign-ins carry a single-use connect code: the login page redeems it
+    // automatically instead of showing the password form.
+    if (_options?.initialCode) {
+      url += `?code=${encodeURIComponent(_options.initialCode)}`;
+    }
+    return { url };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -527,36 +587,71 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     }
     this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: true });
 
+    let authenticated: Awaited<ReturnType<typeof authenticate>> | null = null;
     try {
-      const authenticated = await authenticate(this.env, email, password);
+      authenticated = await authenticate(this.env, email, password);
       if (!authenticated) {
         this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false });
         return { ok: false, error: "Email or password is incorrect." };
       }
 
-      await provisionExecutor(this.env, authenticated.identity, authenticated.cookie);
-      const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-      if (!callback) return { ok: false, error: "This sign-in link has expired." };
-
-      const accountId = this.ctx.exports.ErxesLoginAccount.idFromName(
-        `${authenticated.identity.tenant}:${authenticated.identity.userId}`,
-      );
-      await this.ctx.exports.ErxesLoginAccount.get(accountId).activate(
-        authenticated.identity,
-        callback,
-      );
-      await callback.complete(
-        this.ctx.exports.ErxesUser({ props: { accountId: accountId.toString() } }),
-      );
-      // Keep the nonce (marked completed) so a duplicate submit answers "already signed in"
-      // instead of "expired"; the alarm cleans up at the end of the link's lifetime.
-      this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false, completed: true });
-      return { ok: true };
+      return await this.complete(value, stored, authenticated);
     } catch (error) {
       logger.warn("erxes sign-in failed", { event: "auth.login.failed", error });
       this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false });
       return { ok: false, error: "erxes sign-in is unavailable. Try again." };
     }
+  }
+
+  /**
+   * Passwordless variant for dashboard-embedded sign-ins: redeems a single-use connect code
+   * issued by the erxes backend (which already authenticated the user) and completes the same
+   * provisioning path as a password sign-in.
+   */
+  async loginWithCode(value: string, code: string): Promise<LoginResult> {
+    const status = nonceStatus(this.ctx.storage.kv.get<LoginNonce>("nonce"), value);
+    if (status.kind !== "ok" || status.nonce.claimed) return { ok: false, error: SIGN_IN_IN_PROGRESS_MESSAGE };
+    const stored = status.nonce;
+    this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: true });
+
+    try {
+      const authenticated = await authenticateWithCode(this.env, code);
+      if (!authenticated) {
+        this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false });
+        return { ok: false, error: "This connect code is invalid or has expired." };
+      }
+      return await this.complete(value, stored, authenticated);
+    } catch (error) {
+      logger.warn("erxes connect-code sign-in failed", { event: "auth.login.code_failed", error });
+      this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false });
+      return { ok: false, error: "erxes sign-in is unavailable. Try again." };
+    }
+  }
+
+  /** Shared tail of both sign-in paths: provision Executor, activate the account, notify OS. */
+  private async complete(
+    value: string,
+    stored: LoginNonce,
+    authenticated: NonNullable<Awaited<ReturnType<typeof authenticate>>>,
+  ): Promise<LoginResult> {
+    await provisionExecutor(this.env, authenticated.identity, authenticated.cookie);
+    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (!callback) return { ok: false, error: "This sign-in link has expired." };
+
+    const accountId = this.ctx.exports.ErxesLoginAccount.idFromName(
+      `${authenticated.identity.tenant}:${authenticated.identity.userId}`,
+    );
+    await this.ctx.exports.ErxesLoginAccount.get(accountId).activate(
+      authenticated.identity,
+      callback,
+    );
+    await callback.complete(
+      this.ctx.exports.ErxesUser({ props: { accountId: accountId.toString() } }),
+    );
+    // Keep the nonce (marked completed) so a duplicate submit answers "already signed in"
+    // instead of "expired"; the alarm cleans up at the end of the link's lifetime.
+    this.ctx.storage.kv.put<LoginNonce>("nonce", { ...stored, claimed: false, completed: true });
+    return { ok: true };
   }
 
   activate(identity: ErxesIdentity, callback: Fetcher<GatekeeperConnectCallback>) {

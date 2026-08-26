@@ -13,7 +13,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperConnectOptions, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -649,7 +649,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     return getServerConfig(this.env);
   }
 
-  async startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }> {
+  async startGatekeeperLogin(vendorId: string, initialCode?: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }> {
     if (!getAuthGatekeeperAllowlist(this.env).includes(vendorId)) {
       throw new Error(`Sign-in via "${vendorId}" is not enabled on this deployment.`);
     }
@@ -668,11 +668,14 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     // transient); capability scopes are requested later via an explicit connectAccount. Providers
     // that establish a lasting account during login request full scopes. Cloudflare remains billing
     // only, so it deliberately asks for no gadget-facing resources.
-    const options = vendorId === CLOUDFLARE_VENDOR_ID
+    const options: GatekeeperConnectOptions = vendorId === CLOUDFLARE_VENDOR_ID
       ? { scopes: "full" as const, resourceUrlPatterns: [] }
       : loginCreatesConnectedAccount(vendorId)
         ? { scopes: "full" as const }
         : { scopes: "auth" as const };
+    // A dashboard-embedded sign-in may carry a pre-issued connect code so the gatekeeper can skip
+    // its own password form entirely.
+    if (initialCode) options.initialCode = initialCode;
     const { url } = await vendor.connectAccount(callback, options);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.

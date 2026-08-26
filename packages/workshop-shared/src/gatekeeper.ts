@@ -440,6 +440,12 @@ export type ResourceConfiguratorFrame = GatekeeperUiFrame;
 export type GatekeeperConnectOptions = {
   scopes?: "auth" | "full";
   resourceUrlPatterns?: string[];
+  /**
+   * A pre-issued single-use credential the vendor may use to authenticate the
+   * user without showing its own sign-in UI (e.g. a dashboard SSO connect
+   * code). Vendors that don't support this ignore it.
+   */
+  initialCode?: string;
 };
 
 export interface GatekeeperVendor extends WorkerEntrypoint {

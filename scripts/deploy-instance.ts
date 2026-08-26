@@ -17,7 +17,8 @@
  * Committed configs stay upstream-clean so syncs from cloudflare/cloudflare-os don't conflict;
  * everything instance-shaped lives here or in the generated files.
  *
- * Secrets (ERXES_GRAPHQL_URL, EXECUTOR_URL, EXECUTOR_AUTH_SECRET) are not stored anywhere in the
+ * Secrets (ERXES_GRAPHQL_URL, EXECUTOR_URL, EXECUTOR_AUTH_SECRET, CF_OS_EXCHANGE_URL,
+ * CF_OS_EXCHANGE_SECRET) are not stored anywhere in the
  * repo: pass `--secrets <file>` with a flat JSON object and they're uploaded to gatekeeper-erxes
  * via `wrangler secret bulk` after its deploy.
  *

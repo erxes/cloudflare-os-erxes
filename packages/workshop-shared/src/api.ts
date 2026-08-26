@@ -65,7 +65,7 @@ export interface PublicApi extends RpcTarget {
    * Dispose `attempt` to abandon the sign-in (e.g. the user closed the popup); this cancels the wait
    * server-side.
    */
-  startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }>;
+  startGatekeeperLogin(vendorId: string, initialCode?: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }>;
 
   /** Authenticates the user using an auth token (typically stored in localStorage). */
   authenticate(token: string): Promise<AuthenticatedApi>;

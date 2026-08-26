@@ -7,6 +7,8 @@ declare namespace Cloudflare {
     EXECUTOR_AUTH_SECRET?: string;
     MCP_ALLOW_INSECURE?: string;
     MCP_CLIENT_NAME?: string;
+    CF_OS_EXCHANGE_URL?: string;
+    CF_OS_EXCHANGE_SECRET?: string;
   }
 
   interface GlobalProps {

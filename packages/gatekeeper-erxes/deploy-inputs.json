@@ -13,5 +13,15 @@
     "name": "EXECUTOR_AUTH_SECRET",
     "kind": "secret",
     "label": "Shared Executor auth secret"
+  },
+  {
+    "name": "CF_OS_EXCHANGE_URL",
+    "kind": "secret",
+    "label": "Erxes connect-code exchange URL"
+  },
+  {
+    "name": "CF_OS_EXCHANGE_SECRET",
+    "kind": "secret",
+    "label": "Erxes connect-code exchange secret"
   }
 ]

@@ -18,12 +18,30 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<string | null>(null)
 
+  // A dashboard-embedded sign-in arrives with `?cfOsCode=<single-use code>`: start the matching
+  // vendor's flow immediately with that code so the gatekeeper skips its password form.
+  const autoCodeRef = useRef<string | null | undefined>(undefined)
+  if (autoCodeRef.current === undefined) {
+    autoCodeRef.current = new URLSearchParams(window.location.search).get('cfOsCode')
+  }
+  const autoStartedRef = useRef(false)
+  useEffect(() => {
+    const code = autoCodeRef.current
+    if (!code || autoStartedRef.current || vendors.length === 0) return
+    // The embedded dashboard only signs in through its own vendor; pick the sole auth vendor
+    // configured with connect codes (the erxes gatekeeper).
+    autoStartedRef.current = true
+    start(vendors[0].vendorId, code)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once on mount when vendors arrive
+  }, [vendors])
+
   // Track the pop-up-poll interval, the in-flight login RPC, and mounted state so we can stop a
   // sign-in attempt that's still running if the component unmounts (e.g. the user navigates away
   // mid-login): clear the poller, dispose the RPC (Cap'n Web treats this as a best-effort cancel and
   // frees the client-side pending call), and avoid updating state on an unmounted component.
   const pollRef = useRef<number | null>(null)
   const loginRpcRef = useRef<Disposable | null>(null)
+  const silentFrameRef = useRef<HTMLIFrameElement | null>(null)
   const mountedRef = useRef(true)
   useEffect(() => {
     // Re-assert on (re)mount: under StrictMode the effect runs mount→cleanup→mount, and the cleanup
@@ -41,33 +59,46 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
         try { loginRpcRef.current[Symbol.dispose]() } catch { /* already settled/disposed */ }
         loginRpcRef.current = null
       }
+      silentFrameRef.current?.remove()
+      silentFrameRef.current = null
     }
   }, [])
 
   if (vendors.length === 0) return null
 
-  const start = async (vendorId: string) => {
+  async function start(vendorId: string, initialCode?: string) {
     setError(null)
     setPending(vendorId)
     try {
-      const { url, attempt } = await rpcStub.startGatekeeperLogin(vendorId)
+      const { url, attempt } = await rpcStub.startGatekeeperLogin(vendorId, initialCode)
       // `attempt` is the capability to receive the session token; track it so we can dispose it
       // (cancelling the wait server-side) if the component unmounts mid-login.
       loginRpcRef.current = attempt as unknown as Disposable
-      // NB: don't pass "noopener" — window.open() returns null with it, so we couldn't tell a real
-      // pop-up block from a successful open (nor watch for the user closing it).
-      const popup = window.open(url, 'gatekeeper-login', 'popup,width=520,height=680')
-      if (!popup) {
+      // Silent dashboard SSO runs the gatekeeper URL in a hidden frame so it isn't subject to
+      // popup blockers. Manual sign-in keeps the visible popup and cancellation handling.
+      const silentFrame = initialCode ? document.createElement('iframe') : null
+      if (silentFrame) {
+        silentFrame.hidden = true
+        silentFrame.src = url
+        document.body.appendChild(silentFrame)
+        silentFrameRef.current = silentFrame
+      }
+      const popup = silentFrame
+        ? null
+        : window.open(url, 'gatekeeper-login', 'popup,width=520,height=680')
+      if (!silentFrame && !popup) {
         try { (attempt as unknown as Disposable)[Symbol.dispose]() } catch { /* already disposed */ }
         loginRpcRef.current = null
         throw new Error('Pop-up blocked. Please allow pop-ups and try again.')
       }
-      // Resolve when the gatekeeper finishes, or reject if the user closes the pop-up first.
+
       const token = await new Promise<string>((resolve, reject) => {
         let settled = false
         const finish = (fn: () => void) => {
           if (settled) return
           settled = true
+          silentFrame?.remove()
+          if (silentFrameRef.current === silentFrame) silentFrameRef.current = null
           if (pollRef.current !== null) { clearInterval(pollRef.current); pollRef.current = null }
           // Dispose the attempt stub: cancels the in-flight wait() (e.g. pop-up closed), no-op if it
           // already settled.
@@ -75,9 +106,11 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
           loginRpcRef.current = null
           fn()
         }
-        pollRef.current = window.setInterval(() => {
-          if (popup.closed) finish(() => reject(new Error('Sign-in was cancelled.')))
-        }, 500)
+        if (popup) {
+          pollRef.current = window.setInterval(() => {
+            if (popup.closed) finish(() => reject(new Error('Sign-in was cancelled.')))
+          }, 500)
+        }
         attempt.wait()
           .then(t => finish(() => resolve(t)))
           .catch(e => finish(() => reject(e instanceof Error ? e : new Error('Could not sign in'))))
