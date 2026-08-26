@@ -45,8 +45,8 @@ const INSTANCE = {
   authGatekeepers: "erxes",
   disablePasswordAuth: true,
   aiGateway: {
-    name: "default",
-    providers: "deepseek",
+    name: "erxes-os-internal",
+    providers: "cloudflare",
     accountId: "7c8392aff8ac4518aa06dfa4b6337ef2",
   },
 };
@@ -60,6 +60,9 @@ const DEPLOY_ORDER = ["gatekeeper-erxes", "workshop-backend", "router"];
 
 const secretsFlag = process.argv.indexOf("--secrets");
 const secretsFile = secretsFlag > -1 ? resolve(process.argv[secretsFlag + 1]) : undefined;
+const backendSecretsFlag = process.argv.indexOf("--backend-secrets");
+const backendSecretsFile =
+    backendSecretsFlag > -1 ? resolve(process.argv[backendSecretsFlag + 1]) : undefined;
 const dryRun = process.argv.includes("--dry-run");
 
 function die(message: string): never {
@@ -211,6 +214,9 @@ for (const pkgName of DEPLOY_ORDER) {
           CF_AI_GATEWAY: INSTANCE.aiGateway.name,
           CF_AI_GATEWAY_PROVIDERS: INSTANCE.aiGateway.providers,
           CF_AI_GATEWAY_ACCOUNT_ID: INSTANCE.aiGateway.accountId,
+          // The authenticated gateway rejects the binding sentinel, so inference rides HTTPS
+          // with the gateway token; the WORKERS_AI binding stays for webFetch's toMarkdown.
+          CF_AI_GATEWAY_USE_BINDING: "false",
         },
       };
       break;
@@ -242,8 +248,11 @@ for (const pkgName of DEPLOY_ORDER) {
     continue;
   }
   wrangler(pkgDir, ["deploy", "-c", CONFIG_NAME]);
-  if (pkgName === "gatekeeper-erxes" && secretsFile) {
-    const secrets = JSON.parse(readFileSync(secretsFile, "utf8"));
+  const secretsForWorker =
+      pkgName === "gatekeeper-erxes" ? secretsFile :
+      pkgName === "workshop-backend" ? backendSecretsFile : undefined;
+  if (secretsForWorker) {
+    const secrets = JSON.parse(readFileSync(secretsForWorker, "utf8"));
     wrangler(pkgDir, ["secret", "bulk", "-c", CONFIG_NAME], JSON.stringify(secrets));
     console.log(`sec  ${pkgName}: uploaded ${Object.keys(secrets).length} secret(s)`);
   }
