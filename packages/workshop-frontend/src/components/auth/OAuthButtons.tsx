@@ -41,7 +41,6 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
   // frees the client-side pending call), and avoid updating state on an unmounted component.
   const pollRef = useRef<number | null>(null)
   const loginRpcRef = useRef<Disposable | null>(null)
-  const silentFrameRef = useRef<HTMLIFrameElement | null>(null)
   const mountedRef = useRef(true)
   useEffect(() => {
     // Re-assert on (re)mount: under StrictMode the effect runs mount→cleanup→mount, and the cleanup
@@ -59,8 +58,6 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
         try { loginRpcRef.current[Symbol.dispose]() } catch { /* already settled/disposed */ }
         loginRpcRef.current = null
       }
-      silentFrameRef.current?.remove()
-      silentFrameRef.current = null
     }
   }, [])
 
@@ -74,19 +71,12 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
       // `attempt` is the capability to receive the session token; track it so we can dispose it
       // (cancelling the wait server-side) if the component unmounts mid-login.
       loginRpcRef.current = attempt as unknown as Disposable
-      // Silent dashboard SSO runs the gatekeeper URL in a hidden frame so it isn't subject to
-      // popup blockers. Manual sign-in keeps the visible popup and cancellation handling.
-      const silentFrame = initialCode ? document.createElement('iframe') : null
-      if (silentFrame) {
-        silentFrame.hidden = true
-        silentFrame.src = url
-        document.body.appendChild(silentFrame)
-        silentFrameRef.current = silentFrame
-      }
-      const popup = silentFrame
+      // Connect-code SSO finishes inside startGatekeeperLogin; the browser must not open a
+      // frame (Workshop CSP is frame-src srcdoc:). Manual sign-in still uses a popup.
+      const popup = initialCode
         ? null
         : window.open(url, 'gatekeeper-login', 'popup,width=520,height=680')
-      if (!silentFrame && !popup) {
+      if (!initialCode && !popup) {
         try { (attempt as unknown as Disposable)[Symbol.dispose]() } catch { /* already disposed */ }
         loginRpcRef.current = null
         throw new Error('Pop-up blocked. Please allow pop-ups and try again.')
@@ -97,8 +87,6 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
         const finish = (fn: () => void) => {
           if (settled) return
           settled = true
-          silentFrame?.remove()
-          if (silentFrameRef.current === silentFrame) silentFrameRef.current = null
           if (pollRef.current !== null) { clearInterval(pollRef.current); pollRef.current = null }
           // Dispose the attempt stub: cancels the in-flight wait() (e.g. pop-up closed), no-op if it
           // already settled.

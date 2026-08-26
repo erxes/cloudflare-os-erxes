@@ -541,12 +541,15 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     executorSecret(this.env);
     const accountId = this.ctx.exports.ErxesLoginAccount.newUniqueId();
     const initiationNonce = nonce();
-    await this.ctx.exports.ErxesLoginAccount.get(accountId).begin(callback, initiationNonce);
-    let url = `${getBaseUrl(this.env)}/${accountId}/${initiationNonce}`;
-    // Dashboard-embedded sign-ins carry a single-use connect code: the login page redeems it
-    // automatically instead of showing the password form.
+    const account = this.ctx.exports.ErxesLoginAccount.get(accountId);
+    await account.begin(callback, initiationNonce);
+    const url = `${getBaseUrl(this.env)}/${accountId}/${initiationNonce}`;
+    // Dashboard SSO redeems the connect code on this RPC so the browser never
+    // loads the login page in a frame. Workshop CSP is `frame-src srcdoc:` and
+    // Firefox enforces it (Chrome often does not).
     if (_options?.initialCode) {
-      url += `?code=${encodeURIComponent(_options.initialCode)}`;
+      const result = await account.loginWithCode(initiationNonce, _options.initialCode);
+      if (!result.ok) throw new Error(result.error);
     }
     return { url };
   }
