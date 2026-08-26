@@ -1,9 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cloudflare OS">
-  <path
-    d="M32 8 52.8 20v24L32 56 11.2 44V20L32 8Z"
-    fill="none"
-    stroke="#ff4801"
-    stroke-width="7"
-    stroke-linejoin="round"
-  />
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" aria-label="Cloudflare OS" role="img" viewBox="0 0 64 64"><path fill="none" stroke="#ff4801" stroke-linejoin="round" stroke-width="7" d="M32 8 52.8 20v24L32 56 11.2 44V20L32 8Z"/></svg>
