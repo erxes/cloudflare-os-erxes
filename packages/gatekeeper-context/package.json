@@ -24,7 +24,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/kumo": "^2.9.2",
+    "@cloudflare/kumo": "^2.11.0",
     "@cloudflare/vitest-pool-workers": "catalog:",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-javascript": "^6.2.5",
