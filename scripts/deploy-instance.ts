@@ -39,6 +39,7 @@ const PACKAGES = join(ROOT, "packages");
 
 /** The instance this script deploys. Change these to stand up a different tenant. */
 const INSTANCE = {
+  slug: "erxes-os-internal",
   baseUrl: "https://os.erxes.io",
   admins: ["amaraaamka0404@gmail.com"],
   authGatekeepers: "erxes",
@@ -97,16 +98,16 @@ function ensureKvNamespaces(pkgDir: string, wanted: BindingDecl[]) {
     { id: string; title: string }[];
   const ids: Record<string, string> = {};
   for (const ns of wanted) {
-    const existing = listed.find(entry =>
-      entry.title === ns.binding || entry.title.endsWith(`-${ns.binding}`));
+    const title = `${INSTANCE.slug}-${ns.binding.toLowerCase()}`;
+    const existing = listed.find(entry => entry.title === title);
     if (existing) {
       ids[ns.binding] = existing.id;
       console.log(`kv   ${ns.binding}: ${existing.id} (${existing.title})`);
       continue;
     }
-    // Create with a deterministic title so re-runs find it via the endsWith match above.
+    // Resource titles carry the instance slug so another tenant can share this CF account.
     const out = wrangler(pkgDir,
-      ["kv", "namespace", "create", ns.binding, "--preview", "false"]).out;
+      ["kv", "namespace", "create", title, "--preview", "false"]).out;
     // Wrangler prints both a table line (`id: <hex>`) and a JSON snippet (`"id": "<hex>"`).
     const id = out.match(/"?id"?:\s+"?([0-9a-f]{32})"?/)?.[1];
     if (!id) die(`could not parse created KV namespace id for ${ns.binding}:\n${out}`);
@@ -129,10 +130,12 @@ function ensureR2Bucket(pkgDir: string, bucket: string) {
 // --- config generation ---------------------------------------------------------
 
 interface InstanceConfigPatch {
+  name?: string;
   routes?: unknown[];
   services?: unknown[];
   ai?: unknown;
   kv_namespaces?: { binding: string; id: string }[];
+  r2_buckets?: { binding: string; bucket_name: string }[];
   vars?: Record<string, unknown>;
 }
 
@@ -177,25 +180,29 @@ if (existsSync(frontendDist) && process.argv.includes("--skip-build")) {
 const backendDir = join(PACKAGES, "workshop-backend");
 const backendConfig = readWranglerConfig(backendDir) as InstanceWranglerConfig;
 const kvIds = ensureKvNamespaces(backendDir, backendConfig.kv_namespaces ?? []);
-for (const bucket of backendConfig.r2_buckets ?? []) {
-  ensureR2Bucket(backendDir, bucket.bucket_name);
-}
+const blueprintBucket = `${INSTANCE.slug}-blueprint-content`;
+ensureR2Bucket(backendDir, blueprintBucket);
 
 for (const pkgName of DEPLOY_ORDER) {
   let patch: InstanceConfigPatch;
   switch (pkgName) {
     case "gatekeeper-erxes":
-      patch = { vars: { BASE_URL: `${INSTANCE.baseUrl}/gatekeeper/erxes` } };
+      patch = {
+        name: `${INSTANCE.slug}-gatekeeper-erxes`,
+        vars: { BASE_URL: `${INSTANCE.baseUrl}/gatekeeper/erxes` },
+      };
       break;
     case "workshop-backend":
       patch = {
+        name: `${INSTANCE.slug}-workshop-backend`,
         services: [{
           binding: "GATEKEEPER_ERXES",
-          service: "gatekeeper-erxes",
+          service: `${INSTANCE.slug}-gatekeeper-erxes`,
           entrypoint: "GatekeeperVendor",
         }],
         ai: { binding: "WORKERS_AI" },
         kv_namespaces: Object.entries(kvIds).map(([binding, id]) => ({ binding, id })),
+        r2_buckets: [{ binding: "BLUEPRINT_CONTENT", bucket_name: blueprintBucket }],
         vars: {
           ADMINS: INSTANCE.admins,
           PUBLIC_BASE_URL: INSTANCE.baseUrl,
@@ -209,8 +216,18 @@ for (const pkgName of DEPLOY_ORDER) {
       break;
     case "router":
       patch = {
+        name: `${INSTANCE.slug}-router`,
         routes: [{ pattern: new URL(INSTANCE.baseUrl).host, custom_domain: true }],
-        services: [{ binding: "GATEKEEPER_ERXES", service: "gatekeeper-erxes" }],
+        services: [
+          {
+            binding: "WORKSHOP_BACKEND",
+            service: `${INSTANCE.slug}-workshop-backend`,
+          },
+          {
+            binding: "GATEKEEPER_ERXES",
+            service: `${INSTANCE.slug}-gatekeeper-erxes`,
+          },
+        ],
       };
       break;
     default:
@@ -219,19 +236,18 @@ for (const pkgName of DEPLOY_ORDER) {
 
   const pkgDir = generateConfig(pkgName, patch);
 
-  if (pkgName === "gatekeeper-erxes" && secretsFile) {
-    const secrets = JSON.parse(readFileSync(secretsFile, "utf8"));
-    wrangler(pkgDir, ["secret", "bulk", "-c", CONFIG_NAME], JSON.stringify(secrets));
-    console.log(`sec  ${pkgName}: uploaded ${Object.keys(secrets).length} secret(s)`);
-  }
-
   console.log(`deploying ${pkgName}...`);
   if (dryRun) {
     console.log(`dry-run: skipped deploy of ${pkgName}`);
     continue;
   }
   wrangler(pkgDir, ["deploy", "-c", CONFIG_NAME]);
+  if (pkgName === "gatekeeper-erxes" && secretsFile) {
+    const secrets = JSON.parse(readFileSync(secretsFile, "utf8"));
+    wrangler(pkgDir, ["secret", "bulk", "-c", CONFIG_NAME], JSON.stringify(secrets));
+    console.log(`sec  ${pkgName}: uploaded ${Object.keys(secrets).length} secret(s)`);
+  }
   console.log(`done ${pkgName}`);
 }
 
-console.log(`\ninstance live at ${INSTANCE.baseUrl}`);
+console.log(dryRun ? "\ndry-run complete" : `\ninstance live at ${INSTANCE.baseUrl}`);
