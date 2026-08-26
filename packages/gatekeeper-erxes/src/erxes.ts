@@ -685,8 +685,10 @@ export class ExecutorGatekeeper
     return `executor:${this.ctx.props.accountId}`;
   }
 
-  // Executor applies its per-user policy to every inner tool call. Avoid a second approval around
-  // these wrapper calls.
+  /**
+   * Executor applies its per-user policy to every inner tool call. Avoid a second approval around
+   * these wrapper calls.
+   */
   async tools(): Promise<ClassifiedTool[]> {
     return (await super.tools()).map(entry => ({
       ...entry,
@@ -745,10 +747,24 @@ export class ExecutorGatekeeper
     };
   }
 
-  async setMcpSessionId(endpoint: string, generation: number, sessionId: string | null) {
-    if (generation !== 0 || !sameEndpoint(endpoint, this.ctx.props.endpoint)) return;
+  async assertConnectionCurrent(endpoint: string, generation: number) {
+    if (generation !== 0 || !sameEndpoint(endpoint, this.ctx.props.endpoint)) {
+      throw new Error("This Executor connection changed before the request was sent. Try again.");
+    }
+  }
+
+  async setMcpSessionId(
+    endpoint: string,
+    generation: number,
+    previousSessionId: string | null,
+    sessionId: string | null,
+  ) {
+    if (generation !== 0 || !sameEndpoint(endpoint, this.ctx.props.endpoint)) return false;
+    const currentSessionId = this.ctx.storage.kv.get<string>("mcpSessionId") ?? null;
+    if (currentSessionId !== previousSessionId) return currentSessionId === sessionId;
     if (sessionId) this.ctx.storage.kv.put("mcpSessionId", sessionId);
     else this.ctx.storage.kv.delete("mcpSessionId");
+    return true;
   }
 
   async noteCredentialsExpired(endpoint: string, generation: number) {

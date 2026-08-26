@@ -243,6 +243,81 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/email"
       }
     },
+    "gatekeeper-erxes": {
+      "bindings": [
+        {
+          "name": "ERXES_GRAPHQL_URL",
+          "text": "$SECRET(ERXES_GRAPHQL_URL)",
+          "type": "secret_text"
+        },
+        {
+          "name": "EXECUTOR_URL",
+          "text": "$SECRET(EXECUTOR_URL)",
+          "type": "secret_text"
+        },
+        {
+          "name": "EXECUTOR_AUTH_SECRET",
+          "text": "$SECRET(EXECUTOR_AUTH_SECRET)",
+          "type": "secret_text"
+        }
+      ],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "global_fetch_strictly_public"
+      ],
+      "inputs": [
+        {
+          "kind": "secret",
+          "label": "erxes GraphQL URL",
+          "name": "ERXES_GRAPHQL_URL"
+        },
+        {
+          "kind": "secret",
+          "label": "Executor URL",
+          "name": "EXECUTOR_URL"
+        },
+        {
+          "kind": "secret",
+          "label": "Shared Executor auth secret",
+          "name": "EXECUTOR_AUTH_SECRET"
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "erxes.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "ErxesLoginAccount",
+            "ExecutorGatekeeper"
+          ],
+          "tag": "v0"
+        }
+      ],
+      "modules": [
+        {
+          "name": "erxes.js",
+          "r2Key": "blobs/modules/4724a4c7ca0502212a46388ab98937aa00c104b94446b1ea085b96ce0fce9304",
+          "sha256": "4724a4c7ca0502212a46388ab98937aa00c104b94446b1ea085b96ce0fce9304",
+          "size": 58,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "erxes",
+      "singleton": true,
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/erxes",
+        "MCP_ALLOW_INSECURE": "false"
+      }
+    },
     "gatekeeper-github": {
       "bindings": [
         {
