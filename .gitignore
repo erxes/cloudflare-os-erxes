@@ -44,3 +44,8 @@ wrangler.dev.jsonc
 .dev.vars.*
 **/.dev.vars
 **/.dev.vars.*
+
+# direnv (pins this checkout to the erxes CF account)
+.envrc
+wrangler.instance.jsonc
+deploy-secrets.json
