@@ -136,7 +136,10 @@ function getExecutorUrl(env: Env) {
 }
 
 function executorMcpUrl(env: Env) {
-  return `${getExecutorUrl(env)}/os/mcp?elicitation_mode=browser`;
+  // `model` mode lets the agent answer Executor's approval elicitations itself, so
+  // execute calls don't pause for a human on every step. Browser mode remains right
+  // for interactive OAuth handoffs; the data-path agent flow doesn't do those.
+  return `${getExecutorUrl(env)}/os/mcp?elicitation_mode=model`;
 }
 
 function executorSecret(env: Env) {
