@@ -41,10 +41,17 @@ const EXECUTOR_TYPES = `// Executor use in this erxes deployment.
 //   const result = await env.EXECUTOR.execute({ code: "return ..." });
 //   console.log(JSON.stringify(result));
 //
+// Fetch the how-to before GraphQL work. These are MCP tools on this binding, not sandbox APIs:
+//   await env.EXECUTOR.skills({ name: "execute" });
+//   await env.EXECUTOR.skills({ name: "graphql" });
+//
 // Inside Executor code, find erxes tools with:
 //   const { items } = await tools.search({ namespace: "erxes-officenext", query: "customer", limit: 12 });
-// Then inspect the chosen path with tools.describe.tool({ path }), call tools[path](input), and return
-// its result. The tools object is a lazy proxy and cannot be enumerated.
+// Use item.path (not item.name) with tools.describe.tool({ path }) and tools[path](input).
+// Tool calls return { ok: true, data } or { ok: false, error }. They do not throw for expected
+// failures; check .ok. Nested GraphQL fields still need select, e.g.
+//   select: "list { _id name } totalCount"
+// Outer braces on select are optional. The tools object is a lazy proxy and cannot be enumerated.
 
 ${MCP_BASE_TYPES}`;
 const LOGO = {
