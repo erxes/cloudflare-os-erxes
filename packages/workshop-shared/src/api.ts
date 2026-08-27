@@ -1189,6 +1189,10 @@ export const SUGGESTED_MODELS: Record<
   Record<string, {name: string, contextWindow: number, outputLimit?: number}>
 > = {
   "cloudflare": {
+    "@cf/zai-org/glm-5.3-flash": {
+      name: "GLM 5.3 Flash (Workers AI)", contextWindow: 1048576,
+      outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
     "@cf/moonshotai/kimi-k2.7-code": {
       name: "Kimi K2.7 Code (Workers AI)", contextWindow: 262144,
       outputLimit: WORKERS_AI_OUTPUT_LIMIT,
