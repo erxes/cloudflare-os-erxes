@@ -6226,6 +6226,47 @@ class OverseerImpl implements AgentHooks {
     }));
   }
 
+  // Ambient gatekeeper ids in stable order. If none exist yet but the owner has singleton
+  // connected accounts (e.g. erxes/EXECUTOR), try ensureAmbientCapsules() once so the first
+  // chat turn does not freeze an empty ambient set while Executor provision is still running.
+  async #ambientCapsuleIdsForChatSeed(): Promise<number[]> {
+    let ids = [...this.storage.gatekeepers.list()]
+        .filter(gk => gk.creationSpec?.type === "ambient")
+        .map(gk => gk.id);
+    if (ids.length === 0 && this.ownerId) {
+      await this.ensureAmbientCapsules();
+      ids = [...this.storage.gatekeepers.list()]
+          .filter(gk => gk.creationSpec?.type === "ambient")
+          .map(gk => gk.id);
+    }
+    return ids.toSorted((a, b) => a - b);
+  }
+
+  async #foldAmbientIdsIntoBindingSeed(
+      seed: Record<string, WorkpieceId>,
+      ambientIds: readonly number[],
+  ): Promise<boolean> {
+    let changed = false;
+    let seededTargets = new Set(Object.values(seed));
+    for (let id of ambientIds) {
+      if (seededTargets.has(id)) continue;
+      let gk = this.storage.gatekeepers.get(id);
+      if (!gk) continue;
+      let suggested: string | undefined;
+      try {
+        suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
+      } catch (err) {
+        this.logger.warn("failed to fetch suggested binding name for ambient resource", {
+          event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
+        });
+      }
+      seed[fallbackBindingName(suggested || "RESOURCE", name => name in seed)] = id;
+      seededTargets.add(id);
+      changed = true;
+    }
+    return changed;
+  }
+
   // Derive the workspace's default binding list -- the seed binding layer for new (non-spawned)
   // chats. Deliberately *not stored*: reconstructed on demand (only at chat seeding time) from
   // non-pending gadget records in ID order -- first every gadget under its bindingName (unique,
@@ -6394,11 +6435,15 @@ class OverseerImpl implements AgentHooks {
       // Freeze the ambient set + order on first use. Ordered by gatekeeper id (immutable) for
       // determinism. New singletons the owner gains only appear in chats started afterwards; a
       // since-disconnected one stays in the frozen list but becomes inert.
-      context.alwaysAvailableCapsuleIds = [...this.storage.gatekeepers.list()]
-          .filter(gk => gk.creationSpec?.type === "ambient")
-          .map(gk => gk.id)
-          .toSorted((a, b) => a - b);
+      context.alwaysAvailableCapsuleIds = await this.#ambientCapsuleIdsForChatSeed();
       dirty = true;
+    } else if (context.alwaysAvailableCapsuleIds.length === 0) {
+      // Repair chats that froze an empty ambient set before erxes/EXECUTOR finished wiring.
+      let repaired = await this.#ambientCapsuleIdsForChatSeed();
+      if (repaired.length > 0) {
+        context.alwaysAvailableCapsuleIds = repaired;
+        dirty = true;
+      }
     }
     let ambientIds = context.alwaysAvailableCapsuleIds;
 
@@ -6430,23 +6475,11 @@ class OverseerImpl implements AgentHooks {
 
       // Fold the ambient resources into the seed, each named by its gatekeeper's suggested
       // binding name (deduped); skip any whose target already has a name in the seed.
-      let seededTargets = new Set(Object.values(seed));
-      for (let id of ambientIds) {
-        if (seededTargets.has(id)) continue;
-        let gk = this.storage.gatekeepers.get(id);
-        if (!gk) continue;  // disconnected since the freeze -- inert, no name needed
-        let suggested: string | undefined;
-        try {
-          suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
-        } catch (err) {
-          this.logger.warn("failed to fetch suggested binding name for ambient resource", {
-            event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
-          });
-        }
-        seed[fallbackBindingName(suggested || "RESOURCE", name => name in seed)] = id;
-      }
+      if (await this.#foldAmbientIdsIntoBindingSeed(seed, ambientIds)) dirty = true;
 
       context.bindings = seed;
+      dirty = true;
+    } else if (await this.#foldAmbientIdsIntoBindingSeed(context.bindings, ambientIds)) {
       dirty = true;
     }
     let seedMap = context.bindings;

@@ -644,7 +644,13 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     stored: LoginNonce,
     authenticated: NonNullable<Awaited<ReturnType<typeof authenticate>>>,
   ): Promise<LoginResult> {
-    await provisionExecutor(this.env, authenticated.identity, authenticated.cookie);
+    // Executor provisioning can take tens of seconds on first login (GraphQL tool
+    // catalog). Do not block SSO on it — the OS shell can load while tools sync.
+    this.ctx.waitUntil(
+      provisionExecutor(this.env, authenticated.identity, authenticated.cookie).catch((error) => {
+        logger.warn("executor provision failed", { event: "auth.provision.failed", error });
+      }),
+    );
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) return { ok: false, error: "This sign-in link has expired." };
 
@@ -825,11 +831,12 @@ export class ExecutorGatekeeper
   }
 
   async describe(): Promise<ResourceDescription> {
-    const tools = await this.tools();
+    // Install-time metadata only. MCP tool listing can take tens of seconds while Executor
+    // provisions the GraphQL catalog; addGatekeeper() deletes the row if describe() throws.
     return {
       url: this.ctx.props.endpoint,
       title: this.ctx.props.serverName,
-      snippet: `${tools.length} Executor tools for your erxes account.`,
+      snippet: "Executor tools for your erxes account.",
       suggestedBindingName: "EXECUTOR",
       tsType: sessionTypeName(SERVER_ID, this.ctx.props.endpoint),
     };
