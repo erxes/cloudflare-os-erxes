@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
-import { stripDashboardConnectCode } from '../../dashboardSso'
+import { stripDashboardConnectCode, peekDashboardConnectCode, redeemDashboardConnectCode, clearDashboardConnectCode } from '../../dashboardSso'
 
 interface OAuthButtonsProps {
   rpcStub: RpcStub<PublicApi>
@@ -23,17 +23,15 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
   // vendor's flow immediately with that code so the gatekeeper skips its password form.
   const autoCodeRef = useRef<string | null | undefined>(undefined)
   if (autoCodeRef.current === undefined) {
-    autoCodeRef.current = new URLSearchParams(window.location.search).get('cfOsCode')
+    autoCodeRef.current =
+      peekDashboardConnectCode() ??
+      new URLSearchParams(window.location.search).get('cfOsCode')
   }
-  const autoStartedRef = useRef(false)
   useEffect(() => {
     const code = autoCodeRef.current
-    if (!code || autoStartedRef.current || vendors.length === 0) return
-    // The embedded dashboard only signs in through its own vendor; pick the sole auth vendor
-    // configured with connect codes (the erxes gatekeeper).
-    autoStartedRef.current = true
-    start(vendors[0].vendorId, code)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once on mount when vendors arrive
+    if (!code || vendors.length === 0 || localStorage.getItem('authToken')) return
+    void start(vendors[0].vendorId, code)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when vendors arrive
   }, [vendors])
 
   // Track the pop-up-poll interval, the in-flight login RPC, and mounted state so we can stop a
@@ -68,16 +66,32 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
     setError(null)
     setPending(vendorId)
     try {
-      const { url, attempt } = await rpcStub.startGatekeeperLogin(vendorId, initialCode)
-      // `attempt` is the capability to receive the session token; track it so we can dispose it
-      // (cancelling the wait server-side) if the component unmounts mid-login.
+      const token = initialCode
+        ? await redeemDashboardConnectCode(rpcStub, vendorId, initialCode)
+        : await startManualGatekeeperLogin(vendorId)
+      localStorage.setItem('authToken', token)
+      stripDashboardConnectCode()
+      clearDashboardConnectCode()
+      if (!mountedRef.current) {
+        window.location.reload()
+        return
+      }
+      setPending(null)
+      if (onSuccess) onSuccess()
+      else window.location.reload()
+    } catch (err) {
+      if (!mountedRef.current) return
+      setError(err instanceof Error ? err.message : 'Could not sign in')
+    } finally {
+      if (mountedRef.current) setPending(null)
+    }
+  }
+
+  async function startManualGatekeeperLogin(vendorId: string): Promise<string> {
+      const { url, attempt } = await rpcStub.startGatekeeperLogin(vendorId)
       loginRpcRef.current = attempt as unknown as Disposable
-      // Connect-code SSO finishes inside startGatekeeperLogin; the browser must not open a
-      // frame (Workshop CSP is frame-src srcdoc:). Manual sign-in still uses a popup.
-      const popup = initialCode
-        ? null
-        : window.open(url, 'gatekeeper-login', 'popup,width=520,height=680')
-      if (!initialCode && !popup) {
+      const popup = window.open(url, 'gatekeeper-login', 'popup,width=520,height=680')
+      if (!popup) {
         try { (attempt as unknown as Disposable)[Symbol.dispose]() } catch { /* already disposed */ }
         loginRpcRef.current = null
         throw new Error('Pop-up blocked. Please allow pop-ups and try again.')
@@ -104,16 +118,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
           .then(t => finish(() => resolve(t)))
           .catch(e => finish(() => reject(e instanceof Error ? e : new Error('Could not sign in'))))
       })
-      if (!mountedRef.current) return  // user navigated away mid-flow; drop the result
-      localStorage.setItem('authToken', token)
-      stripDashboardConnectCode()
-      if (onSuccess) onSuccess()
-      else window.location.reload()
-    } catch (err) {
-      if (!mountedRef.current) return
-      setError(err instanceof Error ? err.message : 'Could not sign in')
-      setPending(null)
-    }
+      return token
   }
 
   return (

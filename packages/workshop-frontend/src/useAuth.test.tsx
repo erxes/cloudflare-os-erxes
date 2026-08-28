@@ -199,6 +199,43 @@ describe('useAuth error reporting identity', () => {
 
     expect(authenticate).not.toHaveBeenCalled()
     expect(localStorage.getItem('authToken')).toBeNull()
+    expect(window.location.search).not.toContain('cfOsCode')
+    window.history.replaceState({}, '', '/')
+  })
+
+  it('does not wipe a fresh token when publicApi reconnects after dashboard SSO', async () => {
+    window.history.replaceState({}, '', '/?cfOsCode=handoff-code')
+    const authenticate = vi.fn(() => ({
+      whoami: async () => person,
+      [Symbol.dispose]: () => {},
+    }))
+    const api1 = { authenticate, authenticateFromCfAccess: authenticate } as unknown as RpcStub<PublicApi>
+    const api2 = { authenticate, authenticateFromCfAccess: authenticate } as unknown as RpcStub<PublicApi>
+
+    const captured: { controls?: Controls; publicApi: RpcStub<PublicApi> } = {
+      publicApi: api1,
+    }
+    function Consumer() {
+      const { login, logout } = useAuth(captured.publicApi)
+      captured.controls = { login, logout }
+      return null
+    }
+
+    const container = document.createElement('div')
+    document.body.append(container)
+    containers.push(container)
+    const root = createRoot(container)
+    roots.push(root)
+    await act(async () => root.render(<Consumer />))
+
+    localStorage.setItem('authToken', 'fresh-sso-token')
+    await act(async () => {
+      captured.publicApi = api2
+      root.render(<Consumer />)
+    })
+
+    expect(localStorage.getItem('authToken')).toBe('fresh-sso-token')
+    expect(authenticate).toHaveBeenCalledWith('fresh-sso-token')
     window.history.replaceState({}, '', '/')
   })
 

@@ -1,7 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { clearStoredAuthToken, hasDashboardConnectCode } from './dashboardSso'
+import {
+  clearStoredAuthToken,
+  hasDashboardConnectCode,
+  stripDashboardConnectCode,
+} from './dashboardSso'
 import { setReportedUserId } from './errorReporting'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
@@ -27,6 +31,10 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   // State closures go stale in cleanup functions, so we use a ref.
   const authenticatedApiRef = useRef<RpcStub<AuthenticatedApi> | null>(null)
   authenticatedApiRef.current = authState.authenticatedApi
+
+  // Dashboard SSO strips `cfOsCode` on first load. Later WebSocket reconnects must not treat a
+  // lingering query param as a fresh handoff and wipe a token OAuthButtons just stored.
+  const dashboardHandoffDoneRef = useRef(false)
 
   /**
    * Names the signed-in user on error reports, for as long as this stub is the current one.
@@ -59,10 +67,12 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   useEffect(() => {
     if (CF_ACCESS_MODE) {
       authenticateWithCfAccess()
-    } else if (hasDashboardConnectCode()) {
+    } else if (hasDashboardConnectCode() && !dashboardHandoffDoneRef.current) {
       // Dashboard SSO hands off a fresh connect code for the signed-in erxes user. A stored CF OS
       // token from a previous account must not win or the iframe shows the wrong workspace.
+      dashboardHandoffDoneRef.current = true
       clearStoredAuthToken()
+      stripDashboardConnectCode()
       authenticatedApiRef.current?.[Symbol.dispose]()
       setAuthState({
         token: null,
