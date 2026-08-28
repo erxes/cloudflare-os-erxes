@@ -1020,7 +1020,50 @@ export interface AdminApi {
 
   /** Reorder the menu. `blueprintIds` must be a permutation of the currently promoted ids. */
   setFormatOrder(blueprintIds: string[]): Promise<void>;
+
+  /**
+   * Dump one workspace's chat logs and gadget files from Overseer KV. Bypasses collaborator
+   * `open()`. For operator tooling, not the admin UI.
+   */
+  dumpWorkspace(workspaceId: string): Promise<AdminWorkspaceDump>;
+
+  /**
+   * List workspaces registered on the UserDurableObject named by login identity (email or
+   * username).
+   */
+  listUserWorkspaces(userId: string): Promise<GadgetMetadataWithTimestamps[]>;
 }
+
+/** One workspace as stored on the Overseer, for `AdminApi.dumpWorkspace()`. */
+export type AdminWorkspaceDump = {
+  workspaceId: string;
+  ownerId: string | null;
+  title: string;
+  chats: AdminChatDump[];
+  gadgets: AdminGadgetDump[];
+};
+
+export type AdminChatDump = {
+  meta: AiChatMetadata;
+  /** Chat rows as stored. Workers RPC widens tuple fields (e.g. code changes) into arrays. */
+  messages: unknown[];
+};
+
+export type AdminGadgetDump = {
+  id: WorkpieceId;
+  title: string;
+  created: Date;
+  bindingName: string;
+  commitId?: string;
+  pending?: {chatId: number, sequence?: number};
+  bindings: {
+    name: string;
+    target: WorkpieceId;
+    pending?: {chatId: number, sequence?: number};
+  }[];
+  /** Path/content pairs, same shape as `Overseer.getCodeAtCommit()`. */
+  files: [path: string, content: string][];
+};
 
 /** A partial edit to one promoted format. Absent fields are left alone. */
 export type AdminFormatPatch = {
