@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, AdminWorkspaceDump } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, composeCodeChange, diffFiles, transformCodeChange,
   validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -8268,6 +8268,74 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async getOutputsForOwnerBackfill(ownerId: string): Promise<WorkspaceOutputEntry[] | null> {
     if (this.impl.ownerId !== ownerId) return null;
     return this.impl.outputsSnapshot();
+  }
+
+  /**
+   * Operator dump of this workspace's KV: chat logs and gadget files. Not on the client
+   * `Overseer` from `open()`; only `AdminApi.dumpWorkspace()` should call this.
+   */
+  async dumpForAdmin(): Promise<AdminWorkspaceDump> {
+    // Consume each kv.list() to completion before starting another. Nested iterators throw.
+    let gadgetRecords = Array.from(this.impl.storage.gadgets.list());
+    let chatMetas = Array.from(this.impl.storage.chatMeta.list());
+
+    let pendingChatIds = new Set<number>();
+    for (let gadget of gadgetRecords) {
+      if (gadget.pending) pendingChatIds.add(gadget.pending.chatId);
+    }
+    let pendingContent = new Map<number, CodeContent>();
+    for (let chatId of pendingChatIds) {
+      pendingContent.set(chatId, await this.impl.buildChatContent(chatId));
+    }
+
+    let chats = [];
+    for (let meta of chatMetas) {
+      let messages = Array.from(
+          this.impl.storage.chats.list({prefix: `${keyString(meta.id)}.`}));
+      chats.push({
+        meta,
+        messages: messages.map(msg => {
+          if (msg.type === "action") {
+            let record = this.impl.storage.actions.get(msg.actionId);
+            if (record) msg.actionLog = actionRecordToLog(record);
+          }
+          return this.impl.hydrateChatMessageForClient(msg);
+        }),
+      });
+    }
+
+    let gadgets = [];
+    for (let gadget of gadgetRecords) {
+      let files: [string, string][] = [];
+      if (gadget.commitId) {
+        files = Array.from(await this.impl.gitStore.readCommitFiles(gadget.commitId));
+      } else if (gadget.pending) {
+        let map = pendingContent.get(gadget.pending.chatId)?.get(gadget.id);
+        if (map) files = Array.from(map);
+      }
+      gadgets.push({
+        id: gadget.id,
+        title: gadget.title,
+        created: gadget.created,
+        bindingName: gadget.bindingName,
+        commitId: gadget.commitId,
+        pending: gadget.pending,
+        bindings: Object.entries(gadget.bindings).map(([name, binding]) => ({
+          name,
+          target: binding.target,
+          pending: binding.pending,
+        })),
+        files,
+      });
+    }
+
+    return {
+      workspaceId: this.ctx.id.toString(),
+      ownerId: this.impl.ownerId ?? null,
+      title: this.impl.storage.title.get(),
+      chats,
+      gadgets,
+    } as AdminWorkspaceDump;
   }
 
   /**
