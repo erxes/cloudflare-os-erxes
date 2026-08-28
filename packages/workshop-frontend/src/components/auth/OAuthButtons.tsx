@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
+import { stripDashboardConnectCode } from '../../dashboardSso'
 
 interface OAuthButtonsProps {
   rpcStub: RpcStub<PublicApi>
@@ -105,6 +106,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
       })
       if (!mountedRef.current) return  // user navigated away mid-flow; drop the result
       localStorage.setItem('authToken', token)
+      stripDashboardConnectCode()
       if (onSuccess) onSuccess()
       else window.location.reload()
     } catch (err) {
