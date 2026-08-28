@@ -12,7 +12,7 @@ import { applyAccentColor, applyStoredThemeMode } from './theme'
 import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
-import { installErxesEmbedLogoutListener } from './dashboardSso'
+import { installErxesEmbedLogoutListener, runDashboardHandoffLogin, hasDashboardConnectCode, clearDashboardConnectCode } from './dashboardSso'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
 
 // ---------------------------------------------------------------------------
@@ -275,16 +275,35 @@ const root = createRoot(document.getElementById('root')!, {
   }),
 })
 
-// Kick off dev auto-login in the background. If it completes before
-// useAuth checks the token, the user skips the login page. If the backend
-// is unreachable, the app still renders immediately (showing a connection
-// banner or login page) instead of hanging on a blank screen.
-devAutoLogin(currentStub).catch(() => {})
+function showBootScreen(message: string) {
+  const el = document.getElementById('root')
+  if (!el) return
+  el.innerHTML =
+    `<div class="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">` +
+    `<div class="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>` +
+    `<p class="text-sm text-gray-500">${message}</p></div>`
+}
 
-root.render(
-  <StrictMode>
-    <FrontendErrorBoundary>
-      <AppWithConnection />
-    </FrontendErrorBoundary>
-  </StrictMode>
-)
+async function bootstrap() {
+  if (hasDashboardConnectCode()) {
+    showBootScreen('Signing in…')
+    try {
+      await runDashboardHandoffLogin(currentStub)
+    } catch (error) {
+      console.error('Dashboard SSO failed:', error)
+      clearDashboardConnectCode()
+    }
+  } else {
+    devAutoLogin(currentStub).catch(() => {})
+  }
+
+  root.render(
+    <StrictMode>
+      <FrontendErrorBoundary>
+        <AppWithConnection />
+      </FrontendErrorBoundary>
+    </StrictMode>,
+  )
+}
+
+void bootstrap()
