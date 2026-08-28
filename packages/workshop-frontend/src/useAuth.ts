@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { clearStoredAuthToken, hasDashboardConnectCode } from './dashboardSso'
 import { setReportedUserId } from './errorReporting'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
@@ -58,6 +59,17 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   useEffect(() => {
     if (CF_ACCESS_MODE) {
       authenticateWithCfAccess()
+    } else if (hasDashboardConnectCode()) {
+      // Dashboard SSO hands off a fresh connect code for the signed-in erxes user. A stored CF OS
+      // token from a previous account must not win or the iframe shows the wrong workspace.
+      clearStoredAuthToken()
+      authenticatedApiRef.current?.[Symbol.dispose]()
+      setAuthState({
+        token: null,
+        authenticatedApi: null,
+        isLoading: false,
+        error: null,
+      })
     } else {
       const storedToken = localStorage.getItem('authToken')
       if (storedToken) {
@@ -143,7 +155,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
       }
     })
 
-    localStorage.removeItem('authToken')
+    clearStoredAuthToken()
   }
 
   return {

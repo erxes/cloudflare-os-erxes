@@ -186,6 +186,22 @@ describe('useAuth error reporting identity', () => {
     expect(setReportedUserId).not.toHaveBeenCalled()
   })
 
+  it('does not authenticate from storage when a dashboard connect code is present', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    window.history.replaceState({}, '', '/?cfOsCode=handoff-code')
+    const authenticate = vi.fn(() => ({
+      whoami: async () => person,
+      [Symbol.dispose]: () => {},
+    }))
+    const api = { authenticate, authenticateFromCfAccess: authenticate } as unknown as RpcStub<PublicApi>
+
+    await mount(api)
+
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(localStorage.getItem('authToken')).toBeNull()
+    window.history.replaceState({}, '', '/')
+  })
+
   it('names nobody when the identity lookup fails', async () => {
     localStorage.setItem('authToken', 'stored-token')
     await mount(stubPublicApi())

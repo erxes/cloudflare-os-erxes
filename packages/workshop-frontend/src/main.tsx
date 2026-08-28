@@ -12,6 +12,7 @@ import { applyAccentColor, applyStoredThemeMode } from './theme'
 import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
+import { installErxesEmbedLogoutListener } from './dashboardSso'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
 
 // ---------------------------------------------------------------------------
@@ -180,6 +181,7 @@ window.addEventListener('online', () => void probeOnWake());
 
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
+installErxesEmbedLogoutListener()
 let currentStub = startConnection();
 
 const router = createRouter()
