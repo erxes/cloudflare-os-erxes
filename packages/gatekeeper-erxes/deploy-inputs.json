@@ -15,6 +15,11 @@
     "label": "Shared Executor auth secret"
   },
   {
+    "name": "EXECUTOR_INTEGRATION",
+    "kind": "secret",
+    "label": "Executor GraphQL integration slug"
+  },
+  {
     "name": "CF_OS_EXCHANGE_URL",
     "kind": "secret",
     "label": "Erxes connect-code exchange URL"
