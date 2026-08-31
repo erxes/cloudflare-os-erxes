@@ -5,6 +5,7 @@ declare namespace Cloudflare {
     ERXES_ALLOW_INSECURE?: string;
     EXECUTOR_URL?: string;
     EXECUTOR_AUTH_SECRET?: string;
+    EXECUTOR_INTEGRATION?: string;
     MCP_ALLOW_INSECURE?: string;
     MCP_CLIENT_NAME?: string;
     CF_OS_EXCHANGE_URL?: string;

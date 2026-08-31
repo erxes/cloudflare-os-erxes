@@ -452,6 +452,7 @@ async function authenticateWithCode(env: Env, code: string) {
 }
 
 async function provisionExecutor(env: Env, identity: ErxesIdentity, cookie: string) {
+  const integration = env.EXECUTOR_INTEGRATION?.trim() || "erxes-officenext";
   const response = await fetch(`${getExecutorUrl(env)}/os/provision`, {
     method: "POST",
     redirect: "manual",
@@ -459,7 +460,7 @@ async function provisionExecutor(env: Env, identity: ErxesIdentity, cookie: stri
       Authorization: `Bearer ${await executorToken(env, identity)}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ endpoint: getGraphQlUrl(env), cookie }),
+    body: JSON.stringify({ endpoint: getGraphQlUrl(env), cookie, integration }),
   });
   if (!response.ok) throw new Error(`Executor provisioning failed with status ${response.status}.`);
 }
