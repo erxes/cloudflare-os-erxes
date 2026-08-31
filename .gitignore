@@ -49,3 +49,4 @@ wrangler.dev.jsonc
 .envrc
 wrangler.instance.jsonc
 deploy-secrets.json
+instances/*.secrets.*.json

@@ -3,27 +3,21 @@
  * Deploys one Cloudflare OS instance to a real Cloudflare account with direct `wrangler deploy`s
  * — the self-host path for instances that don't run behind Cloudflare's hosted deploy service.
  *
- * Currently configured for the erxes instance at os.erxes.io. The three workers that instance
- * needs are deployed in dependency order (gatekeepers -> backend -> router); every other
+ * Instance config lives in `instances/<slug>.json`. Secrets live in gitignored sibling files:
+ *   instances/<slug>.secrets.gatekeeper.json
+ *   instances/<slug>.secrets.backend.json
+ *
+ * The three workers deploy in dependency order (gatekeepers -> backend -> router). Every other
  * gatekeeper in the workspace is skipped because AUTH_GATEKEEPERS only allows erxes sign-in.
  *
  * Per worker, the script reads the committed wrangler.jsonc and writes a generated sibling
- * `wrangler.instance.jsonc` (gitignored) with the instance-specific pieces patched in:
- *   - router:    the custom-domain route and GATEKEEPER_ERXES service binding
- *   - backend:   PUBLIC_BASE_URL/ADMINS/auth vars, the WORKERS_AI binding, the erxes vendor
- *                binding, and fresh KV namespace ids created in the target account
- *   - gatekeeper: BASE_URL derived from the public origin
+ * `wrangler.instance.jsonc` (gitignored) with the instance-specific pieces patched in.
  *
- * Committed configs stay upstream-clean so syncs from cloudflare/cloudflare-os don't conflict;
- * everything instance-shaped lives here or in the generated files.
+ * Safety: refuses to run unless CLOUDFLARE_ACCOUNT_ID is pinned to the erxes account.
  *
- * Secrets (ERXES_GRAPHQL_URL, EXECUTOR_URL, EXECUTOR_AUTH_SECRET, CF_OS_EXCHANGE_URL,
- * CF_OS_EXCHANGE_SECRET) are not stored anywhere in the
- * repo: pass `--secrets <file>` with a flat JSON object and they're uploaded to gatekeeper-erxes
- * via `wrangler secret bulk` after its deploy.
- *
- * Safety: refuses to run unless CLOUDFLARE_ACCOUNT_ID is pinned to the erxes account, so an
- * unpinned shell can never point this at the wrong account.
+ * Usage:
+ *   bun scripts/deploy-instance.ts --instance erxes-os-internal [--dry-run] [--skip-build]
+ *   bun scripts/deploy-instance.ts --instance erxes-os-priuscenter --secrets path --backend-secrets path
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -37,20 +31,7 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGES = join(ROOT, "packages");
-
-/** The instance this script deploys. Change these to stand up a different tenant. */
-const INSTANCE = {
-  slug: "erxes-os-internal",
-  baseUrl: "https://os.erxes.io",
-  admins: ["amaraaamka0404@gmail.com"],
-  authGatekeepers: "erxes",
-  disablePasswordAuth: true,
-  aiGateway: {
-    name: "erxes-os-internal",
-    providers: "cloudflare",
-    accountId: "7c8392aff8ac4518aa06dfa4b6337ef2",
-  },
-};
+const INSTANCES_DIR = join(ROOT, "instances");
 
 /** Only this account is allowed. Refusing without the pin protects the personal account. */
 const ALLOWED_ACCOUNT_ID = "7c8392aff8ac4518aa06dfa4b6337ef2";
@@ -59,22 +40,89 @@ const ACCOUNT_NAME = "erxes Inc";
 const CONFIG_NAME = "wrangler.instance.jsonc";
 const DEPLOY_ORDER = ["gatekeeper-erxes", "workshop-backend", "router"];
 
-const secretsFlag = process.argv.indexOf("--secrets");
-const secretsFile = secretsFlag > -1 ? resolve(process.argv[secretsFlag + 1]) : undefined;
-const backendSecretsFlag = process.argv.indexOf("--backend-secrets");
-const backendSecretsFile =
-    backendSecretsFlag > -1 ? resolve(process.argv[backendSecretsFlag + 1]) : undefined;
-const dryRun = process.argv.includes("--dry-run");
+const AUTH_GATEKEEPERS = "erxes";
+const DISABLE_PASSWORD_AUTH = true;
+const AI_GATEWAY_PROVIDERS = "cloudflare";
+
+interface InstanceFile {
+  slug: string;
+  baseUrl: string;
+  admins: string[];
+}
+
+interface ResolvedInstance {
+  slug: string;
+  baseUrl: string;
+  admins: string[];
+  aiGatewayName: string;
+}
 
 function die(message: string): never {
   console.error(`deploy-instance: ${message}`);
   process.exit(1);
 }
 
+function argValue(flag: string): string | undefined {
+  const index = process.argv.indexOf(flag);
+  return index > -1 ? process.argv[index + 1] : undefined;
+}
+
+const instanceSlug = argValue("--instance");
+if (!instanceSlug) die("--instance <slug> is required (e.g. erxes-os-internal)");
+
+const secretsFileOverride = argValue("--secrets");
+const backendSecretsFileOverride = argValue("--backend-secrets");
+const dryRun = process.argv.includes("--dry-run");
+
 if (process.env.CLOUDFLARE_ACCOUNT_ID !== ALLOWED_ACCOUNT_ID) {
   die(`CLOUDFLARE_ACCOUNT_ID must be pinned to ${ACCOUNT_NAME} (${ALLOWED_ACCOUNT_ID}). ` +
       "This checkout uses direnv for that — run from a shell inside the repo.");
 }
+
+function loadInstance(slug: string): ResolvedInstance {
+  const configPath = join(INSTANCES_DIR, `${slug}.json`);
+  if (!existsSync(configPath)) die(`missing instance config: ${relative(configPath)}`);
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    die(`invalid JSON in ${relative(configPath)}`);
+  }
+
+  const file = raw as Partial<InstanceFile>;
+  if (file.slug !== slug) {
+    die(`instance config slug "${file.slug}" does not match --instance "${slug}"`);
+  }
+  if (!file.baseUrl || !file.baseUrl.startsWith("https://")) {
+    die(`instance ${slug}: baseUrl must be an https URL`);
+  }
+  if (!Array.isArray(file.admins) || file.admins.length === 0 ||
+      !file.admins.every(admin => typeof admin === "string" && admin.includes("@"))) {
+    die(`instance ${slug}: admins must be a non-empty email list`);
+  }
+
+  return {
+    slug,
+    baseUrl: file.baseUrl.replace(/\/+$/, ""),
+    admins: file.admins,
+    aiGatewayName: slug,
+  };
+}
+
+function defaultSecretsPath(slug: string, kind: "gatekeeper" | "backend") {
+  return join(INSTANCES_DIR, `${slug}.secrets.${kind}.json`);
+}
+
+function resolveSecretsPath(slug: string, kind: "gatekeeper" | "backend", override?: string) {
+  if (override) return resolve(override);
+  const path = defaultSecretsPath(slug, kind);
+  return existsSync(path) ? path : undefined;
+}
+
+const INSTANCE = loadInstance(instanceSlug);
+const secretsFile = resolveSecretsPath(instanceSlug, "gatekeeper", secretsFileOverride);
+const backendSecretsFile = resolveSecretsPath(instanceSlug, "backend", backendSecretsFileOverride);
 
 function wrangler(pkgDir: string, args: string[], stdin?: string): { ok: boolean; out: string } {
   const result = spawnSync("npx", ["wrangler", ...args], {
@@ -94,9 +142,6 @@ function relative(path: string): string {
   return path.startsWith(ROOT) ? path.slice(ROOT.length + 1) : path;
 }
 
-// --- resources ---------------------------------------------------------------
-
-/** Find-or-create the KV namespaces the backend binds, returning ids keyed by binding name. */
 function ensureKvNamespaces(pkgDir: string, wanted: BindingDecl[]) {
   const listed = JSON.parse(wrangler(pkgDir, ["kv", "namespace", "list"]).out) as
     { id: string; title: string }[];
@@ -109,10 +154,8 @@ function ensureKvNamespaces(pkgDir: string, wanted: BindingDecl[]) {
       console.log(`kv   ${ns.binding}: ${existing.id} (${existing.title})`);
       continue;
     }
-    // Resource titles carry the instance slug so another tenant can share this CF account.
     const out = wrangler(pkgDir,
       ["kv", "namespace", "create", title, "--preview", "false"]).out;
-    // Wrangler prints both a table line (`id: <hex>`) and a JSON snippet (`"id": "<hex>"`).
     const id = out.match(/"?id"?:\s+"?([0-9a-f]{32})"?/)?.[1];
     if (!id) die(`could not parse created KV namespace id for ${ns.binding}:\n${out}`);
     ids[ns.binding] = id;
@@ -130,8 +173,6 @@ function ensureR2Bucket(pkgDir: string, bucket: string) {
   wrangler(pkgDir, ["r2", "bucket", "create", bucket]);
   console.log(`r2   ${bucket}: created`);
 }
-
-// --- config generation ---------------------------------------------------------
 
 interface InstanceConfigPatch {
   name?: string;
@@ -151,7 +192,6 @@ type InstanceWranglerConfig = WranglerConfig & {
 function generateConfig(pkgName: string, patch: InstanceConfigPatch) {
   const pkgDir = join(PACKAGES, pkgName);
   const config = readWranglerConfig(pkgDir) as InstanceWranglerConfig;
-  // The instance route (if any) comes from the patch; never inherit stale ones.
   if (!patch.routes) delete config.routes;
   Object.assign(config, patch);
   const path = join(pkgDir, CONFIG_NAME);
@@ -160,9 +200,7 @@ function generateConfig(pkgName: string, patch: InstanceConfigPatch) {
   return pkgDir;
 }
 
-// --- main ----------------------------------------------------------------------
-
-console.log(`instance: ${INSTANCE.baseUrl} -> account ${ACCOUNT_NAME}`);
+console.log(`instance: ${INSTANCE.slug} ${INSTANCE.baseUrl} -> account ${ACCOUNT_NAME}`);
 
 const frontendDist = join(PACKAGES, "workshop-frontend", "dist", "index.html");
 if (existsSync(frontendDist) && process.argv.includes("--skip-build")) {
@@ -183,9 +221,9 @@ if (existsSync(frontendDist) && process.argv.includes("--skip-build")) {
 
 const backendDir = join(PACKAGES, "workshop-backend");
 const backendConfig = readWranglerConfig(backendDir) as InstanceWranglerConfig;
-const kvIds = ensureKvNamespaces(backendDir, backendConfig.kv_namespaces ?? []);
+const kvIds = dryRun ? {} : ensureKvNamespaces(backendDir, backendConfig.kv_namespaces ?? []);
 const blueprintBucket = `${INSTANCE.slug}-blueprint-content`;
-ensureR2Bucket(backendDir, blueprintBucket);
+if (!dryRun) ensureR2Bucket(backendDir, blueprintBucket);
 
 for (const pkgName of DEPLOY_ORDER) {
   let patch: InstanceConfigPatch;
@@ -210,13 +248,11 @@ for (const pkgName of DEPLOY_ORDER) {
         vars: {
           ADMINS: INSTANCE.admins,
           PUBLIC_BASE_URL: INSTANCE.baseUrl,
-          AUTH_GATEKEEPERS: INSTANCE.authGatekeepers,
-          DISABLE_PASSWORD_AUTH: String(INSTANCE.disablePasswordAuth),
-          CF_AI_GATEWAY: INSTANCE.aiGateway.name,
-          CF_AI_GATEWAY_PROVIDERS: INSTANCE.aiGateway.providers,
-          CF_AI_GATEWAY_ACCOUNT_ID: INSTANCE.aiGateway.accountId,
-          // The authenticated gateway rejects the binding sentinel, so inference rides HTTPS
-          // with the gateway token; the WORKERS_AI binding stays for webFetch's toMarkdown.
+          AUTH_GATEKEEPERS,
+          DISABLE_PASSWORD_AUTH: String(DISABLE_PASSWORD_AUTH),
+          CF_AI_GATEWAY: INSTANCE.aiGatewayName,
+          CF_AI_GATEWAY_PROVIDERS: AI_GATEWAY_PROVIDERS,
+          CF_AI_GATEWAY_ACCOUNT_ID: ALLOWED_ACCOUNT_ID,
           CF_AI_GATEWAY_USE_BINDING: "false",
         },
       };
