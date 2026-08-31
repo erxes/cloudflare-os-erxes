@@ -23,7 +23,7 @@ export function takeDashboardConnectCode(): string | null {
   const fromUrl = readDashboardConnectCode()
   const fromStorage = sessionStorage.getItem(HANDOFF_CODE_STORAGE_KEY)
   const code = fromUrl ?? fromStorage
-  if (fromStorage) sessionStorage.removeItem(HANDOFF_CODE_STORAGE_KEY)
+  if (code) sessionStorage.removeItem(HANDOFF_CODE_STORAGE_KEY)
   return code
 }
 
@@ -57,20 +57,18 @@ export function redeemDashboardConnectCode(
   vendorId: string,
   code: string,
 ): Promise<string> {
-  if (!dashboardHandoffPromise) {
-    dashboardHandoffPromise = (async () => {
-      const { attempt } = await rpcStub.startGatekeeperLogin(vendorId, code)
-      return attempt.wait()
-    })().finally(() => {
-      dashboardHandoffPromise = null
-    })
-  }
+  dashboardHandoffPromise ??= (async () => {
+    const { attempt } = await rpcStub.startGatekeeperLogin(vendorId, code)
+    return attempt.wait()
+  })().finally(() => {
+    dashboardHandoffPromise = null
+  })
   return dashboardHandoffPromise
 }
 
 /** Runs before React so embed handoff is not lost to StrictMode or delayed serverConfig. */
 export async function runDashboardHandoffLogin(stub: RpcStub<PublicApi>): Promise<boolean> {
-  const code = peekDashboardConnectCode() ?? readDashboardConnectCode()
+  const code = takeDashboardConnectCode()
   if (!code) return false
 
   clearStoredAuthToken()

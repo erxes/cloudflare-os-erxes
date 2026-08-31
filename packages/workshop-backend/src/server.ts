@@ -674,8 +674,6 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       : loginCreatesConnectedAccount(vendorId)
         ? { scopes: "full" as const }
         : { scopes: "auth" as const };
-    // A dashboard-embedded sign-in may carry a pre-issued connect code so the gatekeeper can skip
-    // its own password form entirely.
     if (initialCode) options.initialCode = initialCode;
     const { url } = await vendor.connectAccount(callback, options);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type

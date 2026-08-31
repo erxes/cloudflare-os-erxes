@@ -1767,6 +1767,8 @@ export class GatekeeperConnectCallbackImpl
     let userStub = this.#getUserStub();
     await userStub.markCredentialsRestored(this.ctx.props.accountId, expiresAt);
   }
+
+  async abandon(_reason: string): Promise<void> {}
 }
 
 export function normalizeUsername(username: string) {
