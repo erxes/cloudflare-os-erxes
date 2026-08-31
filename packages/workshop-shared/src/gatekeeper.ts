@@ -441,13 +441,12 @@ export type GatekeeperConnectOptions = {
   scopes?: "auth" | "full";
   resourceUrlPatterns?: string[];
   /**
-   * A pre-issued single-use credential the vendor may use to authenticate the
-   * user without showing its own sign-in UI (e.g. a dashboard SSO connect
-   * code). Vendors that don't support this ignore it.
+   * A pre-issued single-use connect code for dashboard-embedded sign-in. The vendor must redeem
+   * it without blocking connectAccount() — typically via waitUntil — so login callbacks do not
+   * re-enter the gatekeeper worker while connectAccount is still open.
    */
   initialCode?: string;
 };
-
 export interface GatekeeperVendor extends WorkerEntrypoint {
   /** Get display info for the service, suitable for display to a user. */
   describe(): Promise<VendorDescription>;
@@ -540,6 +539,12 @@ export interface GatekeeperConnectCallback extends WorkerEntrypoint {
    * `credentialsExpired()` when a refresh or authorization failure is detected.
    */
   complete(user: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void>;
+
+  /**
+   * The authorization flow failed before complete() could run (e.g. an invalid dashboard connect
+   * code). Sign-in callbacks should fail the pending attempt; connect-account callbacks may no-op.
+   */
+  abandon(reason: string): Promise<void>;
 
   // Note: If the authorization flow fails, the error can be displayed directly to the user, and
   // the callback can be discarded.

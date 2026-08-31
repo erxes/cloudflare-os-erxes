@@ -406,9 +406,18 @@ async function authenticateWithCode(env: Env, code: string) {
     headers: { "Content-Type": "application/json", "x-cf-os-secret": exchangeSecret },
     body: JSON.stringify({ code }),
   });
-  if (!response.ok) return null;
+  if (!response.ok) {
+    logger.warn("connect-code exchange failed", {
+      event: "auth.exchange.failed",
+      status: response.status,
+    });
+    return null;
+  }
   const exchanged = (await response.json()) as { authToken?: string };
-  if (!exchanged.authToken) return null;
+  if (!exchanged.authToken) {
+    logger.warn("connect-code exchange missing token", { event: "auth.exchange.failed" });
+    return null;
+  }
 
   const cookie = `auth-token=${exchanged.authToken}`;
   const url = getGraphQlUrl(env);
@@ -424,6 +433,11 @@ async function authenticateWithCode(env: Env, code: string) {
   );
   const user = currentUser.result.data?.currentUser;
   if (!currentUser.response.ok || currentUser.result.errors?.length || !user?._id || !user.email) {
+    logger.warn("connect-code identity check failed", {
+      event: "auth.exchange.identity_failed",
+      status: currentUser.response.status,
+      errors: currentUser.result.errors?.map((e) => e.message),
+    });
     return null;
   }
 
@@ -551,12 +565,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     const account = this.ctx.exports.ErxesLoginAccount.get(accountId);
     await account.begin(callback, initiationNonce);
     const url = `${getBaseUrl(this.env)}/${accountId}/${initiationNonce}`;
-    // Dashboard SSO redeems the connect code on this RPC so the browser never
-    // loads the login page in a frame. Workshop CSP is `frame-src srcdoc:` and
-    // Firefox enforces it (Chrome often does not).
+    // Dashboard SSO redeems the connect code after connectAccount() returns so
+    // callback.complete() does not re-enter this worker while the RPC is open.
     if (_options?.initialCode) {
-      const result = await account.loginWithCode(initiationNonce, _options.initialCode);
-      if (!result.ok) throw new Error(result.error);
+      const code = _options.initialCode;
+      const nonce = initiationNonce;
+      this.ctx.waitUntil(
+        account.redeemDashboardConnectCode(nonce, code),
+      );
     }
     return { url };
   }
@@ -579,6 +595,17 @@ export class ErxesLoginAccount extends DurableObject<Env> {
       claimed: false,
     });
     await this.ctx.storage.setAlarm(Date.now() + LOGIN_LIFETIME_MS);
+  }
+
+  /** Dashboard embed SSO: redeem after connectAccount() returns (via waitUntil). */
+  async redeemDashboardConnectCode(value: string, code: string): Promise<void> {
+    const result = await this.loginWithCode(value, code);
+    if (!result.ok) await this.abandonLogin(result.error);
+  }
+
+  async abandonLogin(reason: string) {
+    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (callback) await callback.abandon(reason);
   }
 
   async nonceStatus(value: string): Promise<NonceStatus> {

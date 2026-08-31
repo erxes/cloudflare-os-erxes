@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
-import { stripDashboardConnectCode, peekDashboardConnectCode, redeemDashboardConnectCode, clearDashboardConnectCode } from '../../dashboardSso'
+import { stripDashboardConnectCode, redeemDashboardConnectCode, clearDashboardConnectCode } from '../../dashboardSso'
 
 interface OAuthButtonsProps {
   rpcStub: RpcStub<PublicApi>
@@ -18,21 +18,6 @@ interface OAuthButtonsProps {
 export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButtonsProps) {
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<string | null>(null)
-
-  // A dashboard-embedded sign-in arrives with `?cfOsCode=<single-use code>`: start the matching
-  // vendor's flow immediately with that code so the gatekeeper skips its password form.
-  const autoCodeRef = useRef<string | null | undefined>(undefined)
-  if (autoCodeRef.current === undefined) {
-    autoCodeRef.current =
-      peekDashboardConnectCode() ??
-      new URLSearchParams(window.location.search).get('cfOsCode')
-  }
-  useEffect(() => {
-    const code = autoCodeRef.current
-    if (!code || vendors.length === 0 || localStorage.getItem('authToken')) return
-    void start(vendors[0].vendorId, code)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when vendors arrive
-  }, [vendors])
 
   // Track the pop-up-poll interval, the in-flight login RPC, and mounted state so we can stop a
   // sign-in attempt that's still running if the component unmounts (e.g. the user navigates away

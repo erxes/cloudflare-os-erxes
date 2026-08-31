@@ -149,4 +149,8 @@ export class LoginConnectCallbackImpl
    */
   async credentialsExpired(): Promise<void> {}
   async credentialsRestored(_expiresAt?: Date): Promise<void> {}
+
+  async abandon(reason: string): Promise<void> {
+    await this.#pending().fail(reason);
+  }
 }
