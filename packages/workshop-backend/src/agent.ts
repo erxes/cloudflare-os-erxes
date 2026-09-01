@@ -887,6 +887,8 @@ Run JavaScript in your personal Executor sandbox and return the result directly.
 
 Write code that returns a value (for example \`return await tools["erxes-officenext.main.listCustomers"]({ ... })\`). Tool calls return \`{ ok: true, data }\` or \`{ ok: false, error }\`; check \`.ok\` instead of relying on exceptions.
 
+erxes list queries use cursor + limit, not page/perPage. \`dateFilters\` must be a JSON string. At most 5 concurrent GraphQL calls; page sequentially, never Promise.all over many pages.
+
 Call \`executorSearch\` to find tool paths, then \`executorDescribe\` on \`item.path\` before the first call to an unfamiliar tool. Do not use executeCode for Executor-only work.
 `.trim();
 
