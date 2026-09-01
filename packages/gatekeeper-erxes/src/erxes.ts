@@ -26,6 +26,7 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { ERXES_EXECUTOR_TYPES_COMMENTS } from "@gadgets/workshop-shared/erxes-executor-guidance";
 
 const LOGIN_LIFETIME_MS = 10 * 60 * 1000;
 const EXECUTOR_TOKEN_LIFETIME_SECONDS = 5 * 60;
@@ -46,19 +47,7 @@ const EXECUTOR_TYPES = `// Executor in this erxes deployment is available throug
 //
 // Inside executorExecute code:
 //   const { items } = await tools.search({ namespace: "erxes-officenext", query: "customer", limit: 12 });
-// Use item.path (not item.name) with tools.describe.tool({ path }) and tools[path](input).
-// Tool calls return { ok: true, data } or { ok: false, error }. Check .ok; they do not throw for
-// expected failures. Nested GraphQL fields still need select, e.g. select: "list { _id name } totalCount".
-// Outer braces on select are optional. The tools object is a lazy proxy and cannot be enumerated.
-//
-// erxes GraphQL pagination uses cursor + limit, not page/perPage. dateFilters is a JSON string.
-// Example: { cursor: undefined, limit: 50, dateFilters: JSON.stringify({ createdAt: { gte: "2026-01-01" } }) }
-//
-// GraphQL paging guardrails (Executor returns HTTP 500 when overloaded):
-// - At most 5 concurrent GraphQL tool calls; prefer sequential page fetches.
-// - Never Promise.all over many pages; loop with await and a small concurrency cap.
-// - For large tables, fetch page 1 with totalCount first, then page sequentially.
-// - Return partial results on failure instead of retrying the whole scan in parallel.
+${ERXES_EXECUTOR_TYPES_COMMENTS}
 
 ${MCP_BASE_TYPES}`;
 const LOGO = {

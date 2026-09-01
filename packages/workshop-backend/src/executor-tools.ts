@@ -1,4 +1,9 @@
 import type { WorkpieceId } from "@gadgets/workshop-shared/api";
+import {
+  ERXES_EXECUTOR_MAX_CONCURRENT,
+} from "@gadgets/workshop-shared/erxes-executor-guidance";
+
+export { ERXES_EXECUTOR_MAX_CONCURRENT };
 
 export const ERXES_EXECUTOR_VENDOR_ID = "erxes";
 export const ERXES_DEFAULT_TOOL_NAMESPACE = "erxes-officenext";
@@ -71,4 +76,43 @@ export function formatExecutorMcpResult(result: ExecutorMcpResult): string {
       result satisfies never;
       throw new Error("Unexpected Executor MCP result.");
   }
+}
+
+/** Limits in-flight Executor MCP calls so parallel GraphQL cannot overload the host. */
+export class ExecutorMcpSemaphore {
+  #inFlight = 0;
+  #queue: (() => void)[] = [];
+
+  constructor(private readonly max: number) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.#acquire();
+    try {
+      return await fn();
+    } finally {
+      this.#release();
+    }
+  }
+
+  #acquire(): Promise<void> {
+    if (this.#inFlight < this.max) {
+      this.#inFlight++;
+      return Promise.resolve();
+    }
+    return new Promise(resolve => this.#queue.push(() => {
+      this.#inFlight++;
+      resolve();
+    }));
+  }
+
+  #release() {
+    this.#inFlight--;
+    this.#queue.shift()?.();
+  }
+}
+
+export function createExecutorMcpSemaphore(
+    max = ERXES_EXECUTOR_MAX_CONCURRENT,
+): ExecutorMcpSemaphore {
+  return new ExecutorMcpSemaphore(max);
 }

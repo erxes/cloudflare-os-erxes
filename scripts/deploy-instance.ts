@@ -28,6 +28,7 @@ import {
   type BindingDecl,
   type WranglerConfig,
 } from "./release/manifest-lib.ts";
+import { ERXES_INSTANCE_INSTRUCTIONS } from "../packages/workshop-shared/src/erxes-executor-guidance.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGES = join(ROOT, "packages");
@@ -254,6 +255,7 @@ for (const pkgName of DEPLOY_ORDER) {
           CF_AI_GATEWAY_PROVIDERS: AI_GATEWAY_PROVIDERS,
           CF_AI_GATEWAY_ACCOUNT_ID: ALLOWED_ACCOUNT_ID,
           CF_AI_GATEWAY_USE_BINDING: "false",
+          INSTANCE_INSTRUCTIONS: ERXES_INSTANCE_INSTRUCTIONS,
         },
       };
       break;

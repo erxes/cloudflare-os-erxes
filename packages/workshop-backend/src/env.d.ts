@@ -78,6 +78,9 @@ declare global {
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 
+      /** Default agent instructions when admin config has none (set by deploy-instance). */
+      INSTANCE_INSTRUCTIONS?: string;
+
       // Daily free-tier LLM-call limit (per user). Defaults to DEFAULT_DAILY_LLM_CALL_LIMIT.
       DAILY_LLM_CALL_LIMIT?: string;
 

@@ -29,11 +29,13 @@ import {
 } from "./ai-gateway";
 import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, CHAT_CHANGE_MESSAGE_BUDGET, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type CompactionCheckpoint, type StoredAssistantMessage } from "./agent";
 import {
+  createExecutorMcpSemaphore,
   executorDescribeCode,
   executorSearchCode,
   findExecutorGatekeeperId,
   formatExecutorMcpResult,
   isExecutorGatekeeper,
+  type ExecutorMcpSemaphore,
 } from "./executor-tools.js";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import { chatChangeStatuses, foldProposedChanges, isCompactionTurn,
@@ -7285,6 +7287,16 @@ class OverseerImpl implements AgentHooks {
 
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
   #codeModeOutputSubscribers = new Map<string, (delta: string) => void>();
+  #executorMcpSemaphores = new Map<number, ExecutorMcpSemaphore>();
+
+  #executorMcpSemaphore(chatId: number): ExecutorMcpSemaphore {
+    let semaphore = this.#executorMcpSemaphores.get(chatId);
+    if (!semaphore) {
+      semaphore = createExecutorMcpSemaphore();
+      this.#executorMcpSemaphores.set(chatId, semaphore);
+    }
+    return semaphore;
+  }
 
   findExecutorGatekeeperId(bindings: Record<string, ChatBindingEntry>): WorkpieceId | undefined {
     return findExecutorGatekeeperId(bindings, id => this.storage.gatekeepers.get(id));
@@ -7292,10 +7304,12 @@ class OverseerImpl implements AgentHooks {
 
   async callExecutorMcpTool(chatId: number, gatekeeperId: WorkpieceId,
                             wireName: string, args: Record<string, unknown>): Promise<string> {
-    let session = await this.startGatekeeperSession(
-        {type: "gatekeeper", id: gatekeeperId}, {from: "agent", chatId});
-    let result = await session.callTool(wireName, args);
-    return formatExecutorMcpResult(result);
+    return this.#executorMcpSemaphore(chatId).run(async () => {
+      let session = await this.startGatekeeperSession(
+          {type: "gatekeeper", id: gatekeeperId}, {from: "agent", chatId});
+      let result = await session.callTool(wireName, args);
+      return formatExecutorMcpResult(result);
+    });
   }
 
   async executorExecute(chatId: number, gatekeeperId: WorkpieceId, code: string): Promise<string> {
@@ -7477,14 +7491,14 @@ class OverseerImpl implements AgentHooks {
 
   async getInstanceInstructions(): Promise<string> {
     try {
-      // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.
-      return (await readAdminConfig(this.env)).instanceInstructions;
+      let fromAdmin = (await readAdminConfig(this.env)).instanceInstructions;
+      if (fromAdmin) return fromAdmin;
     } catch (err) {
       this.logger.warn("failed to read instance instructions", {
         event: "instance.instructions.read.failed", error: err,
       });
-      return "";
     }
+    return this.env.INSTANCE_INSTRUCTIONS ?? "";
   }
 
   async listConnectableVendors(): Promise<{id: string, displayName: string}[]> {
