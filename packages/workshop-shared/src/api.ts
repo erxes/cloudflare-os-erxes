@@ -1243,6 +1243,10 @@ export const SUGGESTED_MODELS: Record<
     "@cf/zai-org/glm-5.2": {
       name: "GLM 5.2 (Workers AI)", contextWindow: 262144, outputLimit: WORKERS_AI_OUTPUT_LIMIT,
     },
+    "@cf/deepseek-ai/deepseek-v4-pro-0813": {
+      name: "DeepSeek V4 Pro 0813 (Workers AI)", contextWindow: 1048576,
+      outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
   },
   "anthropic": {
     // TODO: Include Fable -- but we need an admin option to disable it, since many orgs don't
@@ -3042,10 +3046,10 @@ export type AiToolCall = {
   };
 
   /**
-   * The added binding edge as resolved when the tool ran, recorded so crash recovery can re-adopt
-   * an addition whose "changes" message never flushed (see `addedBindings`), mirroring
-   * createGadget's recorded output. `changeId` is the change number of the batch that records the
-   * addition. Absent only when the call failed (`error` is set).
+   * The added binding edge as resolved when the tool ran -- the durable record of what the call
+   * did, which history replay reproduces instead of re-running the tool, mirroring createGadget's
+   * recorded output. `changeId` is the change number of the batch that records the addition (see
+   * `addedBindings`). Absent only when the call failed (`error` is set).
    */
   output?: {gadgetId: WorkpieceId, name: string, target: WorkpieceId, changeId: number};
 } | {
