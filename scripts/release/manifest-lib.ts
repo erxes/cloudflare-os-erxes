@@ -299,6 +299,11 @@ export const DEFAULT_CRED_INPUTS: DeployInput[] = [
 
 const GATEKEEPER_PREFIX = "gatekeeper-";
 
+/** Read and parse a package directory's wrangler.jsonc. */
+export function readWranglerConfig(pkgDir: string): WranglerConfig {
+  return parse(readFileSync(join(pkgDir, "wrangler.jsonc"), "utf8")) as WranglerConfig;
+}
+
 /** Read every deployable package and its Wrangler configuration, sorted by package name. */
 export function readDeployablePackages(packagesDir: string): DeployablePackage[] {
   return readdirSync(packagesDir)
