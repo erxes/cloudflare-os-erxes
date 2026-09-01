@@ -407,6 +407,18 @@ export interface AgentHooks {
                    initiator: AiChatAuthorInfo, initiatorModelId: string,
                    bindings: Record<string, ChatBindingEntry>,
                    onOutputText?: (delta: string) => void): Promise<string>;
+
+  /** Returns the chat's erxes Executor gatekeeper id, if wired. */
+  findExecutorGatekeeperId(bindings: Record<string, ChatBindingEntry>): WorkpieceId | undefined;
+
+  executorExecute(chatId: number, gatekeeperId: WorkpieceId, code: string): Promise<string>;
+  executorSearch(chatId: number, gatekeeperId: WorkpieceId, input: {
+    query: string;
+    namespace?: string;
+    limit?: number;
+  }): Promise<string>;
+  executorDescribe(chatId: number, gatekeeperId: WorkpieceId, path: string): Promise<string>;
+
   activeAgentCallbackCount(chatId: number): number;
   rejectAllAgentCallbacks(chatId: number, error: string): void;
   consumeCapturedActions(chatId: number)
@@ -830,7 +842,29 @@ Note that this differs from the \`env\` a Gadget's own code sees: a Gadget's ser
 
 When the user asks you to just do a task that can be done with these bindings, you should use executeCode to perform the task, instead of adding code to a gadget to do it.
 
+IMPORTANT: When Executor tools (\`executorExecute\`, \`executorSearch\`, \`executorDescribe\`) are available, use them for erxes GraphQL and Executor catalog work. Do NOT route that through executeCode. executeCode is for Gadget RPC, hook registration, restore forging, agent callbacks, or scripts that mix multiple bindings in one run.
+
 The function also receives a \`self\` parameter which is a magic object that points back to this chat thread. Calling any method on \`self\`, like \`self.foo(123)\`, delivers a callback message to this chat and activates you to respond. \`self\` can be passed over RPC (e.g. to a subscription method) and stored in a Durable Object's KV storage for long-term callbacks. When an agent callback is received, it appears in your env under a name like \`PARAMS_1\`, with \`.args\` (the callback arguments), \`.resolve(value)\` (to return a value to the caller), and \`.reject(error)\` (to reject with an error).
+`.trim();
+
+let EXECUTOR_EXECUTE_TOOL_DESCRIPTION = `
+Run JavaScript in your personal Executor sandbox and return the result directly. Use this for erxes GraphQL tool calls and any other Executor catalog work.
+
+Write code that returns a value (for example \`return await tools["erxes-officenext.main.listCustomers"]({ ... })\`). Tool calls return \`{ ok: true, data }\` or \`{ ok: false, error }\`; check \`.ok\` instead of relying on exceptions.
+
+Call \`executorSearch\` to find tool paths, then \`executorDescribe\` on \`item.path\` before the first call to an unfamiliar tool. Do not use executeCode for Executor-only work.
+`.trim();
+
+let EXECUTOR_SEARCH_TOOL_DESCRIPTION = `
+Search the erxes Executor tool catalog. Returns matching tools with \`path\` values for \`executorDescribe\` and \`executorExecute\`.
+
+Use \`item.path\` (not \`item.name\`) when calling or describing tools.
+`.trim();
+
+let EXECUTOR_DESCRIBE_TOOL_DESCRIPTION = `
+Describe one Executor tool by path (from \`executorSearch\`). Returns input/output TypeScript shapes and usage notes.
+
+Always describe before calling an unfamiliar erxes GraphQL tool.
 `.trim();
 
 let LIST_CONNECTABLE_RESOURCES_TOOL_DESCRIPTION = `
@@ -1679,6 +1713,14 @@ export async function runAgent(
                 case "executeCode":
                   toolOutput = {text: toolCall.output!};
                   break;
+                case "executorExecute":
+                case "executorSearch":
+                case "executorDescribe":
+                  if (toolCall.output === undefined) {
+                    throw new Error(`${toolCall.toolName} tool call in log is missing output`);
+                  }
+                  toolOutput = {text: toolCall.output};
+                  break;
                 case "giveUp":
                   toolOutput = {text: jsonToolResultText({rejected: true})};
                   break;
@@ -1932,9 +1974,13 @@ export async function runAgent(
               role: "user",
               content:
                   `The user accepted your connection request for "${msg.vendorName}". ` +
-                  `The resource is available as \`env.${name}\` for use in executeCode ` +
-                  `in this conversation. Use describeBinding("${name}") to learn its API, then ` +
-                  `use it. If a Gadget's code needs it permanently, use setGadgetBinding to wire ` +
+                  (msg.vendorName.toLowerCase() === "erxes"
+                    ? `Use executorSearch, executorDescribe, and executorExecute for erxes data ` +
+                      `in this conversation. describeBinding("${name}") documents the connection. `
+                    : `The resource is available as \`env.${name}\` for use in executeCode ` +
+                      `in this conversation. Use describeBinding("${name}") to learn its API, then ` +
+                      `use it. `) +
+                  `If a Gadget's code needs it permanently, use setGadgetBinding to wire ` +
                   `it into that gadget.`,
               timestamp: msgTimestamp,
             });
@@ -2339,6 +2385,9 @@ export async function runAgent(
         "Env binding name of the workpiece (e.g. gadget) that owns the file, as listed in the " +
         "system prompt or chosen in createGadget.",
   });
+
+  let executorGatekeeperId =
+      hooks.findExecutorGatekeeperId(Object.fromEntries(chatBindings));
 
   let tools: Record<string, AgentTool> = {
     readFile: defineTool({
@@ -2902,6 +2951,74 @@ export async function runAgent(
     }),
   };
 
+  if (executorGatekeeperId !== undefined) {
+    let gatekeeperId = executorGatekeeperId;
+    tools.executorExecute = defineTool({
+      name: "executorExecute",
+      label: "Executor execute",
+      description: EXECUTOR_EXECUTE_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        code: Type.String({
+          description:
+              "JavaScript to run in Executor. Return a value (for example " +
+              "`return await tools[\"namespace.role.toolName\"](input)`).",
+        }),
+      }),
+      execute: async (toolCallId, {code}) => {
+        try {
+          let output = await hooks.executorExecute(chatId, gatekeeperId, code);
+          return toolResult(output, {output} as Partial<AiToolCall>);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      },
+    });
+    tools.executorSearch = defineTool({
+      name: "executorSearch",
+      label: "Executor search",
+      description: EXECUTOR_SEARCH_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        query: Type.String({description: "Search terms, e.g. \"customer\" or \"deals list\"."}),
+        namespace: Type.Optional(Type.String({
+          description: "Integration namespace to search. Defaults to erxes-officenext.",
+        })),
+        limit: Type.Optional(Type.Number({
+          description: "Maximum matches to return (default 12).",
+        })),
+      }),
+      execute: async (toolCallId, input) => {
+        try {
+          let output = await hooks.executorSearch(chatId, gatekeeperId, input);
+          return toolResult(output, {output} as Partial<AiToolCall>);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      },
+    });
+    tools.executorDescribe = defineTool({
+      name: "executorDescribe",
+      label: "Executor describe",
+      description: EXECUTOR_DESCRIBE_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        path: Type.String({
+          description:
+              "Tool path from executorSearch (item.path), e.g. erxes-officenext.main.listCustomers.",
+        }),
+      }),
+      execute: async (toolCallId, {path}) => {
+        try {
+          let output = await hooks.executorDescribe(chatId, gatekeeperId, path);
+          return toolResult(output, {output} as Partial<AiToolCall>);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      },
+    });
+  }
+
   // When the agent was started to handle callbacks, add the giveUp tool so it can bail out.
   if (callbackInitiated) {
     tools.giveUp = defineTool({
@@ -2926,6 +3043,11 @@ export async function runAgent(
     tools = {
       describeBinding: tools.describeBinding,
       executeCode: tools.executeCode,
+      ...(tools.executorExecute ? {
+        executorExecute: tools.executorExecute,
+        executorSearch: tools.executorSearch,
+        executorDescribe: tools.executorDescribe,
+      } : {}),
       ...(callbackInitiated ? {giveUp: tools.giveUp} : {}),
     };
   }

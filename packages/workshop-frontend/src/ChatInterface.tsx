@@ -775,6 +775,24 @@ function getToolCallSummary(
           : undefined,
       };
     }
+    case "executorExecute": {
+      const firstLine = tc.input.code
+        ?.split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.length > 0);
+      return {
+        verb: "Executor",
+        target: firstLine
+          ? firstLine.length > 60
+            ? `${firstLine.slice(0, 57)}…`
+            : firstLine
+          : "execute",
+      };
+    }
+    case "executorSearch":
+      return { verb: "Executor search", target: tc.input.query };
+    case "executorDescribe":
+      return { verb: "Executor describe", target: tc.input.path };
     case "giveUp":
       return { verb: "Stopped" };
     case "webFetch": {
@@ -853,6 +871,12 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Fetched ${pluralize(count, "page")}`;
     case "executeCode":
       return count === 1 ? "Ran code" : `Ran code ${formatTimes(count)}`;
+    case "executorExecute":
+      return count === 1 ? "Ran Executor code" : `Ran Executor code ${formatTimes(count)}`;
+    case "executorSearch":
+      return count === 1 ? "Searched Executor tools" : `Searched Executor tools ${formatTimes(count)}`;
+    case "executorDescribe":
+      return count === 1 ? "Described Executor tool" : `Described Executor tools ${formatTimes(count)}`;
     case "describeBinding":
       return `Inspected ${pluralize(count, "binding")}`;
     case "setBindingHook":
@@ -891,6 +915,10 @@ function getToolIcon(
     case "editFile":
       return PencilSimple;
     case "executeCode":
+      return Terminal;
+    case "executorExecute":
+    case "executorSearch":
+    case "executorDescribe":
       return Terminal;
     case "webFetch":
       return Globe;
@@ -933,6 +961,12 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Creating gadget";
     case "executeCode":
       return "Running code";
+    case "executorExecute":
+      return "Running Executor code";
+    case "executorSearch":
+      return "Searching Executor tools";
+    case "executorDescribe":
+      return "Describing Executor tool";
     case "webFetch":
       return "Fetching web page";
     case "observeUserChanges":
@@ -960,6 +994,9 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "saveCapsuleAsBinding": return "Saving";
     case "createGadget": return "Creating gadget";
     case "executeCode": return "Running code";
+    case "executorExecute": return "Running Executor code";
+    case "executorSearch": return "Searching Executor tools";
+    case "executorDescribe": return "Describing Executor tool";
     case "webFetch": return "Fetching";
     case "observeUserChanges": return "Observing user changes";
     case "giveUp": return "Stopping";
@@ -980,6 +1017,12 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "editFile": return `Making ${count} edits`;
     case "webFetch": return `Fetching ${pluralize(count, "page")}`;
     case "executeCode": return count === 1 ? "Running code" : `Running code ${formatTimes(count)}`;
+    case "executorExecute":
+      return count === 1 ? "Running Executor code" : `Running Executor code ${formatTimes(count)}`;
+    case "executorSearch":
+      return count === 1 ? "Searching Executor tools" : `Searching Executor tools ${formatTimes(count)}`;
+    case "executorDescribe":
+      return count === 1 ? "Describing Executor tool" : `Describing Executor tools ${formatTimes(count)}`;
     case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
     case "setBindingHook": return `Connecting ${pluralize(count, "binding")}`;
     case "setGadgetBinding": return `Wiring up ${pluralize(count, "binding")}`;

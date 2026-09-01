@@ -28,6 +28,13 @@ import {
   type AiGatewayLogRoute,
 } from "./ai-gateway";
 import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type AiChatMessageBodyWithModelData, type CompactionCheckpoint, type StoredAssistantMessage } from "./agent";
+import {
+  executorDescribeCode,
+  executorSearchCode,
+  findExecutorGatekeeperId,
+  formatExecutorMcpResult,
+  isExecutorGatekeeper,
+} from "./executor-tools.js";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import { chatChangeStatuses, foldProposedChanges, isCompactionTurn,
   type ChangeBatch } from "./agent-compaction";
@@ -2773,8 +2780,15 @@ class OverseerImpl implements AgentHooks {
         case "workpiece": {
           if (this.storage.gadgets.get(entry.id)) {
             env[name] = this.makeBindingLoopback({type: "gadget", id: entry.id}, caller);
-          } else if (this.storage.gatekeepers.get(entry.id)) {
-            env[name] = this.makeBindingLoopback({type: "gatekeeper", id: entry.id}, caller);
+          } else {
+            let gatekeeper = this.storage.gatekeepers.get(entry.id);
+            if (gatekeeper) {
+              // Executor is agent-native (executorExecute/search/describe tools). Keep it out of
+              // executeCode so erxes work does not pass through the log-only CF OS sandbox.
+              if (!isExecutorGatekeeper(gatekeeper)) {
+                env[name] = this.makeBindingLoopback({type: "gatekeeper", id: entry.id}, caller);
+              }
+            }
           }
           break;
         }
@@ -7262,6 +7276,36 @@ class OverseerImpl implements AgentHooks {
 
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
   #codeModeOutputSubscribers = new Map<string, (delta: string) => void>();
+
+  findExecutorGatekeeperId(bindings: Record<string, ChatBindingEntry>): WorkpieceId | undefined {
+    return findExecutorGatekeeperId(bindings, id => this.storage.gatekeepers.get(id));
+  }
+
+  async callExecutorMcpTool(chatId: number, gatekeeperId: WorkpieceId,
+                            wireName: string, args: Record<string, unknown>): Promise<string> {
+    let session = await this.startGatekeeperSession(
+        {type: "gatekeeper", id: gatekeeperId}, {from: "agent", chatId});
+    let result = await session.callTool(wireName, args);
+    return formatExecutorMcpResult(result);
+  }
+
+  async executorExecute(chatId: number, gatekeeperId: WorkpieceId, code: string): Promise<string> {
+    return this.callExecutorMcpTool(chatId, gatekeeperId, "execute", {code});
+  }
+
+  async executorSearch(chatId: number, gatekeeperId: WorkpieceId, input: {
+    query: string;
+    namespace?: string;
+    limit?: number;
+  }): Promise<string> {
+    return this.callExecutorMcpTool(
+        chatId, gatekeeperId, "execute", {code: executorSearchCode(input)});
+  }
+
+  async executorDescribe(chatId: number, gatekeeperId: WorkpieceId, path: string): Promise<string> {
+    return this.callExecutorMcpTool(
+        chatId, gatekeeperId, "execute", {code: executorDescribeCode(path)});
+  }
 
   async executeCodeMode(chatId: number, code: string,
                         initiator: AiChatAuthorInfo, initiatorModelId: string,

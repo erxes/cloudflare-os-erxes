@@ -3102,6 +3102,26 @@ export type AiToolCall = {
   /** Output, if the code actually ran. (Otherwise, `error` should be present.) */
   output?: string;
 } | {
+  toolName: "executorExecute";
+  input: {
+    code: string;
+  };
+  output?: string;
+} | {
+  toolName: "executorSearch";
+  input: {
+    query: string;
+    namespace?: string;
+    limit?: number;
+  };
+  output?: string;
+} | {
+  toolName: "executorDescribe";
+  input: {
+    path: string;
+  };
+  output?: string;
+} | {
   toolName: "giveUp";
   input: {
     error: string;
