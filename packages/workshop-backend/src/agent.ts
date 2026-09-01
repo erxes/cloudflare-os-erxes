@@ -1935,7 +1935,11 @@ export async function runAgent(
             `\`env.${name}.resolve(value)\` or \`env.${name}.reject(error)\`. ` +
             `The caller is blocked until you do so. Once you resolve or reject all open ` +
             `callbacks, your turn will end immediately; be sure to complete everything ` +
-            `you need to do before that.`;
+            `you need to do before that.\n\n` +
+            `For gadget chat callbacks (e.g. onGadgetChat): resolve quickly from ` +
+            `\`env.${name}.args\` and any context already in the request. Do not call ` +
+            `\`EXECUTOR\` or other heavy bindings unless the question requires live data ` +
+            `not present in the callback args. Target under 30 seconds.`;
 
         modelMessages.push({ role: "user", content, timestamp: msgTimestamp });
         break;
