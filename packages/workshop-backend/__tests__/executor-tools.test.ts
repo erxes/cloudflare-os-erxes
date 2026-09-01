@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ERXES_DEFAULT_TOOL_NAMESPACE,
+  ExecutorMcpSemaphore,
   executorDescribeCode,
   executorSearchCode,
   findExecutorGatekeeperId,
@@ -79,5 +80,28 @@ describe("formatExecutorMcpResult", () => {
       actionId: 1,
       message: "needs approval",
     })).toThrow("needs approval");
+  });
+});
+
+describe("ExecutorMcpSemaphore", () => {
+  it("caps concurrent in-flight work", async () => {
+    let semaphore = new ExecutorMcpSemaphore(2);
+    let inFlight = 0;
+    let maxSeen = 0;
+    let release!: () => void;
+    let gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    let tasks = Array.from({ length: 4 }, () => semaphore.run(async () => {
+      inFlight++;
+      maxSeen = Math.max(maxSeen, inFlight);
+      await gate;
+      inFlight--;
+    }));
+    await Promise.resolve();
+    expect(maxSeen).toBeLessThanOrEqual(2);
+    release();
+    await Promise.all(tasks);
+    expect(maxSeen).toBe(2);
   });
 });

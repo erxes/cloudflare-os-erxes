@@ -3,6 +3,12 @@ import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type Code
   type CodeChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
+import {
+  ERXES_EXECUTOR_DESCRIBE_GUIDANCE,
+  ERXES_EXECUTOR_EXECUTE_GUIDANCE,
+  ERXES_EXECUTOR_MAX_DESCRIBE_PER_TURN,
+  ERXES_EXECUTOR_SEARCH_GUIDANCE,
+} from "@gadgets/workshop-shared/erxes-executor-guidance";
 import { createWorkshopLogger } from "./observability";
 import { Type } from "@earendil-works/pi-ai";
 import type {
@@ -887,19 +893,21 @@ Run JavaScript in your personal Executor sandbox and return the result directly.
 
 Write code that returns a value (for example \`return await tools["erxes-officenext.main.listCustomers"]({ ... })\`). Tool calls return \`{ ok: true, data }\` or \`{ ok: false, error }\`; check \`.ok\` instead of relying on exceptions.
 
+${ERXES_EXECUTOR_EXECUTE_GUIDANCE}
+
 Call \`executorSearch\` to find tool paths, then \`executorDescribe\` on \`item.path\` before the first call to an unfamiliar tool. Do not use executeCode for Executor-only work.
 `.trim();
 
 let EXECUTOR_SEARCH_TOOL_DESCRIPTION = `
 Search the erxes Executor tool catalog. Returns matching tools with \`path\` values for \`executorDescribe\` and \`executorExecute\`.
 
-Use \`item.path\` (not \`item.name\`) when calling or describing tools.
+${ERXES_EXECUTOR_SEARCH_GUIDANCE}
 `.trim();
 
 let EXECUTOR_DESCRIBE_TOOL_DESCRIPTION = `
 Describe one Executor tool by path (from \`executorSearch\`). Returns input/output TypeScript shapes and usage notes.
 
-Always describe before calling an unfamiliar erxes GraphQL tool.
+${ERXES_EXECUTOR_DESCRIBE_GUIDANCE}
 `.trim();
 
 let LIST_CONNECTABLE_RESOURCES_TOOL_DESCRIPTION = `
@@ -2905,6 +2913,7 @@ export async function runAgent(
 
   if (executorGatekeeperId !== undefined) {
     let gatekeeperId = executorGatekeeperId;
+    let executorDescribeCount = 0;
     tools.executorExecute = defineTool({
       name: "executorExecute",
       label: "Executor execute",
@@ -2960,6 +2969,12 @@ export async function runAgent(
         }),
       }),
       execute: async (toolCallId, {path}) => {
+        if (++executorDescribeCount > ERXES_EXECUTOR_MAX_DESCRIBE_PER_TURN) {
+          let message =
+              `executorDescribe limit (${ERXES_EXECUTOR_MAX_DESCRIBE_PER_TURN}) reached this turn. ` +
+              `Call executorExecute with paths you already described.`;
+          return toolResult(message, {output: message} as Partial<AiToolCall>);
+        }
         try {
           let output = await hooks.executorDescribe(chatId, gatekeeperId, path);
           return toolResult(output, {output} as Partial<AiToolCall>);

@@ -26,6 +26,7 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { ERXES_EXECUTOR_TYPES_COMMENTS } from "@gadgets/workshop-shared/erxes-executor-guidance";
 
 const LOGIN_LIFETIME_MS = 10 * 60 * 1000;
 const EXECUTOR_TOKEN_LIFETIME_SECONDS = 5 * 60;
@@ -46,9 +47,7 @@ const EXECUTOR_TYPES = `// Executor in this erxes deployment is available throug
 //
 // Inside executorExecute code:
 //   const { items } = await tools.search({ namespace: "erxes-officenext", query: "customer", limit: 12 });
-// Tool calls return { ok: true, data } or { ok: false, error }. Check .ok; they do not throw for
-// expected failures. Nested GraphQL fields still need select, e.g. select: "list { _id name } totalCount".
-// Outer braces on select are optional.
+${ERXES_EXECUTOR_TYPES_COMMENTS}
 
 ${MCP_BASE_TYPES}`;
 const LOGO = {
