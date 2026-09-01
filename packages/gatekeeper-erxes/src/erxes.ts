@@ -34,24 +34,21 @@ const SERVER_ID = "executor";
 const SERVER_NAME = "Executor";
 const SCOPE: ToolScope = {};
 const TRUST: ServerTrust = "byo";
-const EXECUTOR_TYPES = `// Executor use in this erxes deployment.
+const EXECUTOR_TYPES = `// Executor in this erxes deployment is available through agent tools, not executeCode.
 //
-// Do not inspect or enumerate this binding. Do not call listTools for an erxes request.
-// Call execute directly. executeCode only shows console output, so log the Executor RPC result:
-//   const result = await env.EXECUTOR.execute({ code: "return ..." });
-//   console.log(JSON.stringify(result));
+// Use these tools for erxes GraphQL and catalog work:
+//   executorSearch({ query: "customer" })           — find tool paths (use item.path)
+//   executorDescribe({ path: "..." })               — input/output schema for one tool
+//   executorExecute({ code: "return await tools[...](...)" }) — run code; result returns directly
 //
-// Fetch the how-to before GraphQL work. These are MCP tools on this binding, not sandbox APIs:
-//   await env.EXECUTOR.skills({ name: "execute" });
-//   await env.EXECUTOR.skills({ name: "graphql" });
+// Do not route Executor work through executeCode. executeCode is for Gadget RPC, hooks, restore,
+// agent callbacks, or scripts that mix multiple bindings.
 //
-// Inside Executor code, find erxes tools with:
+// Inside executorExecute code:
 //   const { items } = await tools.search({ namespace: "erxes-officenext", query: "customer", limit: 12 });
-// Use item.path (not item.name) with tools.describe.tool({ path }) and tools[path](input).
-// Tool calls return { ok: true, data } or { ok: false, error }. They do not throw for expected
-// failures; check .ok. Nested GraphQL fields still need select, e.g.
-//   select: "list { _id name } totalCount"
-// Outer braces on select are optional. The tools object is a lazy proxy and cannot be enumerated.
+// Tool calls return { ok: true, data } or { ok: false, error }. Check .ok; they do not throw for
+// expected failures. Nested GraphQL fields still need select, e.g. select: "list { _id name } totalCount".
+// Outer braces on select are optional.
 
 ${MCP_BASE_TYPES}`;
 const LOGO = {
