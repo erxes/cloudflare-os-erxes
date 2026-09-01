@@ -1,8 +1,13 @@
-import type { McpCallResult } from "@gadgets/mcp-shared/base-types";
 import type { WorkpieceId } from "@gadgets/workshop-shared/api";
 
 export const ERXES_EXECUTOR_VENDOR_ID = "erxes";
 export const ERXES_DEFAULT_TOOL_NAMESPACE = "erxes-officenext";
+
+type ExecutorMcpResult =
+  | { status: "ok"; text: string; structuredContent?: unknown; isError?: boolean }
+  | { status: "pending"; message: string }
+  | { status: "rejected"; message: string }
+  | { status: "failed"; message: string };
 
 export type ChatBindingEntryLike =
   | { type: "workpiece"; id: WorkpieceId }
@@ -45,7 +50,7 @@ export function executorDescribeCode(path: string): string {
   return `return tools.describe.tool(${JSON.stringify({ path })})`;
 }
 
-export function formatExecutorMcpResult(result: McpCallResult): string {
+export function formatExecutorMcpResult(result: ExecutorMcpResult): string {
   switch (result.status) {
     case "ok": {
       let text = result.text;

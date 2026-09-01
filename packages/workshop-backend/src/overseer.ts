@@ -2780,11 +2780,15 @@ class OverseerImpl implements AgentHooks {
         case "workpiece": {
           if (this.storage.gadgets.get(entry.id)) {
             env[name] = this.makeBindingLoopback({type: "gadget", id: entry.id}, caller);
-          } else if (let gatekeeper = this.storage.gatekeepers.get(entry.id)) {
-            // Executor is agent-native (executorExecute/search/describe tools). Keep it out of
-            // executeCode so erxes work does not pass through the log-only CF OS sandbox.
-            if (isExecutorGatekeeper(gatekeeper)) break;
-            env[name] = this.makeBindingLoopback({type: "gatekeeper", id: entry.id}, caller);
+          } else {
+            let gatekeeper = this.storage.gatekeepers.get(entry.id);
+            if (gatekeeper) {
+              // Executor is agent-native (executorExecute/search/describe tools). Keep it out of
+              // executeCode so erxes work does not pass through the log-only CF OS sandbox.
+              if (!isExecutorGatekeeper(gatekeeper)) {
+                env[name] = this.makeBindingLoopback({type: "gatekeeper", id: entry.id}, caller);
+              }
+            }
           }
           break;
         }
