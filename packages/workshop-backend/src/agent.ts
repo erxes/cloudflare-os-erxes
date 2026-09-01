@@ -627,6 +627,8 @@ Make Gadget UIs responsive and usable on both desktop and phones by default.
 
 Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Gadget communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.
 
+Gadget facet Durable Objects cannot call \`setAlarm\` or \`this.state.storage.setAlarm\`. Scheduled work must use the ambient \`SCHEDULER\` gatekeeper binding (\`calendarAt\`, \`every\`, \`runAt\`) with \`ctx.restore()\` hooks, then enable the schedule in Connections.
+
 Note that the iframe sandbox on the client side prohibits modal popup boxes like alert() and confirm(), so do not use those.
 
 ## Server -> Client callbacks and subscriptions
