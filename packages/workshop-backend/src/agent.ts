@@ -8,6 +8,7 @@ import {
   ERXES_EXECUTOR_EXECUTE_GUIDANCE,
   ERXES_EXECUTOR_MAX_DESCRIBE_PER_TURN,
   ERXES_EXECUTOR_SEARCH_GUIDANCE,
+  ERXES_EXECUTOR_TOOL_NAMES,
 } from "@gadgets/workshop-shared/erxes-executor-guidance";
 import { createWorkshopLogger } from "./observability";
 import { Type } from "@earendil-works/pi-ai";
@@ -1935,7 +1936,12 @@ export async function runAgent(
             `\`env.${name}.resolve(value)\` or \`env.${name}.reject(error)\`. ` +
             `The caller is blocked until you do so. Once you resolve or reject all open ` +
             `callbacks, your turn will end immediately; be sure to complete everything ` +
-            `you need to do before that.`;
+            `you need to do before that.\n\n` +
+            `For gadget chat callbacks (e.g. onGadgetChat): resolve quickly from ` +
+            `\`env.${name}.args\` and any context already in the request. Prefer ` +
+            `\`env.${name}.resolve(...)\` without tool calls when args are enough. Do not call ` +
+            `${ERXES_EXECUTOR_TOOL_NAMES} unless the question requires live data ` +
+            `not present in the callback args. Target under 30 seconds.`;
 
         modelMessages.push({ role: "user", content, timestamp: msgTimestamp });
         break;
@@ -2911,7 +2917,7 @@ export async function runAgent(
     }),
   };
 
-  if (executorGatekeeperId !== undefined) {
+  if (executorGatekeeperId !== undefined && !callbackInitiated) {
     let gatekeeperId = executorGatekeeperId;
     let executorDescribeCount = 0;
     tools.executorExecute = defineTool({
