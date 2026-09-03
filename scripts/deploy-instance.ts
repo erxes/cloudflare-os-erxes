@@ -7,8 +7,8 @@
  *   instances/<slug>.secrets.gatekeeper.json
  *   instances/<slug>.secrets.backend.json
  *
- * The three workers deploy in dependency order (gatekeepers -> backend -> router). Every other
- * gatekeeper in the workspace is skipped because AUTH_GATEKEEPERS only allows erxes sign-in.
+ * Workers deploy in table order (INSTANCE_GATEKEEPERS -> backend -> router). Gatekeepers not in
+ * the table are skipped. AUTH_GATEKEEPERS stays "erxes" (sign-in allow-list, not the deploy set).
  *
  * Per worker, the script reads the committed wrangler.jsonc and writes a generated sibling
  * `wrangler.instance.jsonc` (gitignored) with the instance-specific pieces patched in.
@@ -24,6 +24,16 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  INSTANCE_GATEKEEPERS,
+  applyInstancePatch,
+  buildInstancePatches,
+  deployOrder,
+  secretsKindForPackage,
+  type InstanceConfigPatch,
+  type InstanceWranglerConfig,
+  type ResourceIds,
+} from "./deploy-instance-gatekeepers.ts";
+import {
   readWranglerConfig,
   type BindingDecl,
   type WranglerConfig,
@@ -38,7 +48,6 @@ const ALLOWED_ACCOUNT_ID = "7c8392aff8ac4518aa06dfa4b6337ef2";
 const ACCOUNT_NAME = "erxes Inc";
 
 const CONFIG_NAME = "wrangler.instance.jsonc";
-const DEPLOY_ORDER = ["gatekeeper-erxes", "workshop-backend", "router"];
 
 const AUTH_GATEKEEPERS = "erxes";
 const DISABLE_PASSWORD_AUTH = true;
@@ -174,26 +183,10 @@ function ensureR2Bucket(pkgDir: string, bucket: string) {
   console.log(`r2   ${bucket}: created`);
 }
 
-interface InstanceConfigPatch {
-  name?: string;
-  routes?: unknown[];
-  services?: unknown[];
-  ai?: unknown;
-  kv_namespaces?: { binding: string; id: string }[];
-  r2_buckets?: { binding: string; bucket_name: string }[];
-  vars?: Record<string, unknown>;
-}
-
-type InstanceWranglerConfig = WranglerConfig & {
-  routes?: unknown[];
-  r2_buckets?: (BindingDecl & { bucket_name: string })[];
-};
-
 function generateConfig(pkgName: string, patch: InstanceConfigPatch) {
   const pkgDir = join(PACKAGES, pkgName);
-  const config = readWranglerConfig(pkgDir) as InstanceWranglerConfig;
-  if (!patch.routes) delete config.routes;
-  Object.assign(config, patch);
+  const committed = readWranglerConfig(pkgDir) as WranglerConfig & InstanceWranglerConfig;
+  const config = applyInstancePatch(committed, patch);
   const path = join(pkgDir, CONFIG_NAME);
   writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
   console.log(`gen  ${relative(path)}`);
@@ -219,64 +212,43 @@ if (existsSync(frontendDist) && process.argv.includes("--skip-build")) {
   }
 }
 
+const table = INSTANCE_GATEKEEPERS;
 const backendDir = join(PACKAGES, "workshop-backend");
-const backendConfig = readWranglerConfig(backendDir) as InstanceWranglerConfig;
-const kvIds = dryRun ? {} : ensureKvNamespaces(backendDir, backendConfig.kv_namespaces ?? []);
-const blueprintBucket = `${INSTANCE.slug}-blueprint-content`;
-if (!dryRun) ensureR2Bucket(backendDir, blueprintBucket);
+const backendConfig = readWranglerConfig(backendDir) as WranglerConfig & InstanceWranglerConfig;
+const contextDir = join(PACKAGES, "gatekeeper-context");
+const contextConfig = readWranglerConfig(contextDir) as WranglerConfig & InstanceWranglerConfig;
 
-for (const pkgName of DEPLOY_ORDER) {
-  let patch: InstanceConfigPatch;
-  switch (pkgName) {
-    case "gatekeeper-erxes":
-      patch = {
-        name: `${INSTANCE.slug}-gatekeeper-erxes`,
-        vars: { BASE_URL: `${INSTANCE.baseUrl}/gatekeeper/erxes` },
-      };
-      break;
-    case "workshop-backend":
-      patch = {
-        name: `${INSTANCE.slug}-workshop-backend`,
-        services: [{
-          binding: "GATEKEEPER_ERXES",
-          service: `${INSTANCE.slug}-gatekeeper-erxes`,
-          entrypoint: "GatekeeperVendor",
-        }],
-        ai: { binding: "WORKERS_AI" },
-        kv_namespaces: Object.entries(kvIds).map(([binding, id]) => ({ binding, id })),
-        r2_buckets: [{ binding: "BLUEPRINT_CONTENT", bucket_name: blueprintBucket }],
-        vars: {
-          ADMINS: INSTANCE.admins,
-          PUBLIC_BASE_URL: INSTANCE.baseUrl,
-          AUTH_GATEKEEPERS,
-          DISABLE_PASSWORD_AUTH: String(DISABLE_PASSWORD_AUTH),
-          CF_AI_GATEWAY: INSTANCE.aiGatewayName,
-          CF_AI_GATEWAY_PROVIDERS: AI_GATEWAY_PROVIDERS,
-          CF_AI_GATEWAY_ACCOUNT_ID: ALLOWED_ACCOUNT_ID,
-          CF_AI_GATEWAY_USE_BINDING: "false",
-        },
-      };
-      break;
-    case "router":
-      patch = {
-        name: `${INSTANCE.slug}-router`,
-        routes: [{ pattern: new URL(INSTANCE.baseUrl).host, custom_domain: true }],
-        services: [
-          {
-            binding: "WORKSHOP_BACKEND",
-            service: `${INSTANCE.slug}-workshop-backend`,
-          },
-          {
-            binding: "GATEKEEPER_ERXES",
-            service: `${INSTANCE.slug}-gatekeeper-erxes`,
-          },
-        ],
-      };
-      break;
-    default:
-      die(`no config patch defined for ${pkgName}`);
-  }
+const resources: ResourceIds = {
+  backendKv: dryRun ? {} : ensureKvNamespaces(backendDir, backendConfig.kv_namespaces ?? []),
+  contextKv: dryRun
+    ? {}
+    : ensureKvNamespaces(contextDir, contextConfig.kv_namespaces ?? []),
+  blueprintBucket: `${INSTANCE.slug}-blueprint-content`,
+};
+if (!dryRun) ensureR2Bucket(backendDir, resources.blueprintBucket);
 
+const baseVarsByPackage: Record<string, Record<string, unknown>> = {};
+for (const row of table) {
+  const committed = readWranglerConfig(join(PACKAGES, row.package)) as WranglerConfig & {
+    vars?: Record<string, unknown>;
+  };
+  if (committed.vars) baseVarsByPackage[row.package] = committed.vars;
+}
+
+const patches = buildInstancePatches({
+  instance: INSTANCE,
+  table,
+  accountId: ALLOWED_ACCOUNT_ID,
+  authGatekeepers: AUTH_GATEKEEPERS,
+  disablePasswordAuth: DISABLE_PASSWORD_AUTH,
+  aiGatewayProviders: AI_GATEWAY_PROVIDERS,
+  baseVarsByPackage,
+  resources,
+});
+
+for (const pkgName of deployOrder(table)) {
+  const patch = patches[pkgName];
+  if (!patch) die(`no config patch defined for ${pkgName}`);
   const pkgDir = generateConfig(pkgName, patch);
 
   console.log(`deploying ${pkgName}...`);
@@ -285,9 +257,10 @@ for (const pkgName of DEPLOY_ORDER) {
     continue;
   }
   wrangler(pkgDir, ["deploy", "-c", CONFIG_NAME]);
+  const kind = secretsKindForPackage(pkgName, table);
   const secretsForWorker =
-      pkgName === "gatekeeper-erxes" ? secretsFile :
-      pkgName === "workshop-backend" ? backendSecretsFile : undefined;
+    kind === "gatekeeper" ? secretsFile :
+    kind === "backend" ? backendSecretsFile : undefined;
   if (secretsForWorker) {
     const secrets = JSON.parse(readFileSync(secretsForWorker, "utf8"));
     wrangler(pkgDir, ["secret", "bulk", "-c", CONFIG_NAME], JSON.stringify(secrets));
