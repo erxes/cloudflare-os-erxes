@@ -92,13 +92,6 @@ export function secretsKindForPackage(
   return table.find((r) => r.package === pkgName)?.secrets;
 }
 
-export function kvWantsForPackage(
-  pkgName: string,
-  table: readonly GatekeeperRow[],
-): readonly string[] {
-  return table.find((r) => r.package === pkgName)?.kvBindings ?? [];
-}
-
 export function mergeVars(
   base: Record<string, unknown> | undefined,
   overlay: Record<string, unknown>,
