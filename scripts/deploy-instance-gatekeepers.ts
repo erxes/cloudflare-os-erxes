@@ -150,10 +150,11 @@ function gatekeeperPatch(
     }),
   };
   const kvIds = gatekeeperKvIds(row, resources);
-  if (row.kvBindings?.length && kvIds) {
+  if (row.kvBindings?.length && kvIds &&
+      row.kvBindings.every((binding) => Boolean(kvIds[binding]))) {
     patch.kv_namespaces = row.kvBindings.map((binding) => ({
       binding,
-      id: kvIds[binding] ?? "",
+      id: kvIds[binding],
     }));
   }
   return patch;

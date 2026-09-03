@@ -106,4 +106,37 @@ describe("deploy-instance-gatekeepers", () => {
     });
     expect(patches["workshop-backend"].vars?.AUTH_GATEKEEPERS).toBe("erxes");
   });
+
+  test("dry-run omits context kv when ids are empty", () => {
+    const patches = buildInstancePatches({
+      instance,
+      table: INSTANCE_GATEKEEPERS,
+      accountId: "acct",
+      authGatekeepers: "erxes",
+      disablePasswordAuth: true,
+      aiGatewayProviders: "cloudflare",
+      baseVarsByPackage: {},
+      resources: emptyResources,
+    });
+    expect(patches["gatekeeper-context"].kv_namespaces).toBeUndefined();
+  });
+
+  test("context kv ids land when provisioned", () => {
+    const patches = buildInstancePatches({
+      instance,
+      table: INSTANCE_GATEKEEPERS,
+      accountId: "acct",
+      authGatekeepers: "erxes",
+      disablePasswordAuth: true,
+      aiGatewayProviders: "cloudflare",
+      baseVarsByPackage: {},
+      resources: {
+        ...emptyResources,
+        contextKv: { CONTEXT_COLLECTIONS: "abc123" },
+      },
+    });
+    expect(patches["gatekeeper-context"].kv_namespaces).toEqual([
+      { binding: "CONTEXT_COLLECTIONS", id: "abc123" },
+    ]);
+  });
 });
