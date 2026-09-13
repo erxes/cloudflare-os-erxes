@@ -90,6 +90,39 @@ describe("filterCatalog", () => {
     });
     expect(filterCatalog(entries, { kind: "mcp", q: "sla", limit: 10 })).toHaveLength(1);
   });
+
+  test("preserves api.json order instead of sorting by name", () => {
+    const entries = normalizeIntegrationsShCatalog({
+      data: [
+        {
+          id: "curated/deepwiki-com-mcp",
+          kind: "mcp",
+          name: "DeepWiki",
+          description: "",
+          connectUrl: "https://mcp.deepwiki.com/mcp",
+        },
+        {
+          id: "mcp/zzz-speed",
+          kind: "mcp",
+          name: "0-1000 Speed Test",
+          description: "",
+          connectUrl: "https://example.com/mcp",
+        },
+        {
+          id: "curated/slack-com-mcp",
+          kind: "mcp",
+          name: "Slack",
+          description: "",
+          connectUrl: "https://mcp.slack.com/mcp",
+        },
+      ],
+    });
+    expect(filterCatalog(entries, { limit: 10 }).map((e) => e.name)).toEqual([
+      "DeepWiki",
+      "0-1000 Speed Test",
+      "Slack",
+    ]);
+  });
 });
 
 describe("rankDetectCandidates", () => {

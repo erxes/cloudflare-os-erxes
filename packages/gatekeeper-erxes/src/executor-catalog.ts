@@ -114,12 +114,7 @@ export function filterCatalog(
       e.endpoint.toLowerCase().includes(q)
     );
   });
-  filtered.sort((a, b) => {
-    const af = a.featured ? 0 : 1;
-    const bf = b.featured ? 0 : 1;
-    if (af !== bf) return af - bf;
-    return a.name.localeCompare(b.name);
-  });
+  // Keep integrations.sh api.json order (curated block, then their ranking).
   return filtered.slice(0, limit);
 }
 
