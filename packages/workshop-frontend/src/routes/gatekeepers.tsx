@@ -10,6 +10,8 @@ import {
   Hexagon,
   ShieldCheck,
   Plugs,
+  Trash,
+  PencilSimple,
 } from '@phosphor-icons/react'
 import ViewToggle from '../components/ViewToggle'
 import { useAuthenticatedApi } from '../AuthContext'
@@ -473,6 +475,8 @@ function ConnectorsPage() {
   const [integrationKind, setIntegrationKind] = useState<'' | 'mcp' | 'openapi' | 'graphql'>('')
   const [connectIntegrationOpen, setConnectIntegrationOpen] = useState(false)
   const [connectCatalogId, setConnectCatalogId] = useState<string | undefined>(undefined)
+  const [reconnectSlug, setReconnectSlug] = useState<string | undefined>(undefined)
+  const [disconnectingSlug, setDisconnectingSlug] = useState<string | null>(null)
   const hasErxesAccount = accounts.some((a) => a.vendorId === 'erxes')
 
   const [modalTarget, setModalTarget] = useState<ModalTarget>(null)
@@ -567,6 +571,36 @@ function ConnectorsPage() {
       .listExecutorIntegrations()
       .then(setExecutorIntegrations)
       .catch((err) => logRpcFailure('Failed to load Executor integrations:', err))
+  }
+
+  const handleDisconnectExecutor = async (slug: string, name: string) => {
+    if (
+      !window.confirm(
+        `Disconnect ${name}? This removes your Executor connection and the integration registration.`,
+      )
+    ) {
+      return
+    }
+    setDisconnectingSlug(slug)
+    try {
+      await authenticatedApi.disconnectExecutorIntegration(slug)
+      toasts.add({ title: `Disconnected ${name}`, variant: 'success' })
+      refreshExecutorIntegrations()
+    } catch (err) {
+      logRpcFailure('disconnectExecutorIntegration failed:', err)
+      toasts.add({
+        title: err instanceof Error ? err.message : 'Failed to disconnect',
+        variant: 'error',
+      })
+    } finally {
+      setDisconnectingSlug(null)
+    }
+  }
+
+  const handleUpdateExecutor = (slug: string) => {
+    setConnectCatalogId(undefined)
+    setReconnectSlug(slug)
+    setConnectIntegrationOpen(true)
   }
 
   useEffect(() => {
@@ -792,6 +826,7 @@ function ConnectorsPage() {
               type="button"
               onClick={() => {
                 setConnectCatalogId(undefined)
+                setReconnectSlug(undefined)
                 setConnectIntegrationOpen(true)
               }}
               className="inline-flex items-center gap-1.5 rounded-lg border border-kumo-line bg-kumo-base px-3 py-1.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default hover:bg-kumo-inset"
@@ -856,7 +891,26 @@ function ConnectorsPage() {
                         {row.kind.toUpperCase()} · connected
                       </div>
                     </div>
-                    <span className="size-2 rounded-full bg-emerald-500" aria-hidden />
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        title="Update credentials"
+                        disabled={disconnectingSlug === row.slug}
+                        onClick={() => handleUpdateExecutor(row.slug)}
+                        className="grid size-8 place-items-center rounded-lg text-kumo-subtle hover:bg-kumo-inset hover:text-kumo-default disabled:opacity-50"
+                      >
+                        <PencilSimple size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        title="Disconnect"
+                        disabled={disconnectingSlug === row.slug}
+                        onClick={() => void handleDisconnectExecutor(row.slug, row.name)}
+                        className="grid size-8 place-items-center rounded-lg text-kumo-subtle hover:bg-kumo-inset hover:text-red-600 disabled:opacity-50"
+                      >
+                        <Trash size={14} />
+                      </button>
+                    </div>
                   </div>
                 ))}
             </div>
@@ -1032,11 +1086,15 @@ function ConnectorsPage() {
         open={connectIntegrationOpen}
         onOpenChange={(open) => {
           setConnectIntegrationOpen(open)
-          if (!open) setConnectCatalogId(undefined)
+          if (!open) {
+            setConnectCatalogId(undefined)
+            setReconnectSlug(undefined)
+          }
         }}
         connected={executorIntegrations}
         onConnected={refreshExecutorIntegrations}
         initialCatalogId={connectCatalogId}
+        reconnectSlug={reconnectSlug}
       />
 
       {activeVendor && (

@@ -346,6 +346,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.submitExecutorSecret(input);
   }
 
+  disconnectExecutorIntegration(slug: string): Promise<void> {
+    return this.#user.disconnectExecutorIntegration(slug);
+  }
+
+  reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult> {
+    return this.#user.reconnectExecutorIntegration(slug);
+  }
+
   provisionAmbientAccount(vendorId: string): Promise<void> {
     return this.#user.provisionAmbientAccount(vendorId);
   }

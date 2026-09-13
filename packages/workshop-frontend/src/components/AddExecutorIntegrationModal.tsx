@@ -17,6 +17,8 @@ type Props = {
   onConnected: () => void
   connected: ExecutorIntegrationInfo[]
   initialCatalogId?: string
+  /** Existing Executor slug — reopen auth (update key / OAuth). */
+  reconnectSlug?: string
 }
 
 const KINDS: { id: '' | ExecutorIntegrationKind; label: string }[] = [
@@ -79,6 +81,7 @@ export function AddExecutorIntegrationModal({
   onConnected,
   connected,
   initialCatalogId,
+  reconnectSlug,
 }: Props) {
   const { authenticatedApi } = useAuthenticatedApi()
   const [q, setQ] = useState('')
@@ -233,7 +236,33 @@ export function AddExecutorIntegrationModal({
     )
 
   useEffect(() => {
-    if (!open || !initialCatalogId || busy || secret || oauth) return
+    if (!open || !reconnectSlug || busy || secret || oauth) return
+    let cancelled = false
+    void (async () => {
+      setBusy(true)
+      setError(null)
+      setWorkingLabel(reconnectSlug)
+      try {
+        const result = await authenticatedApi.reconnectExecutorIntegration(reconnectSlug)
+        if (cancelled) return
+        await applyConnectResult(result)
+      } catch (err) {
+        if (cancelled) return
+        logRpcFailure('reconnectExecutorIntegration failed:', err)
+        setError(err instanceof Error ? err.message : 'Update failed.')
+        setWorkingLabel(null)
+      } finally {
+        if (!cancelled) setBusy(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, reconnectSlug])
+
+  useEffect(() => {
+    if (!open || !initialCatalogId || busy || secret || oauth || reconnectSlug) return
     let cancelled = false
     void (async () => {
       setBusy(true)

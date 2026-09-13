@@ -580,6 +580,17 @@ export interface AuthenticatedApi extends RpcTarget {
   submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }>;
 
   /**
+   * Remove this user's Executor connection(s) for `slug` and delete the integration.
+   * Soft no-op pieces (404) are fine; throws on hard failures.
+   */
+  disconnectExecutorIntegration(slug: string): Promise<void>;
+
+  /**
+   * Re-enter auth for an existing Executor integration (update API key / OAuth).
+   */
+  reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult>;
+
+  /**
    * Opt into an ambient gatekeeper: mint its connected account for this user (no OAuth flow). Only
    * works while the vendor's mode is 'optional' (or 'enabled') and the user has no account yet; the
    * new account then appears via subscribeConnectedAccounts(). Throws otherwise.

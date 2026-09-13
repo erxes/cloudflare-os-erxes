@@ -19,7 +19,9 @@ import {
 } from "./executor-catalog";
 import {
   connectMcpTarget,
+  disconnectExecutorIntegration,
   rankDetectCandidates,
+  reconnectExecutorIntegration,
   resolveFromCatalog,
   submitSecret,
   type ExecutorJson,
@@ -871,6 +873,24 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     return submitSecret(api, input);
   }
 
+  async disconnectExecutorIntegration(slug: string): Promise<void> {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      throw new Error("Sign in to erxes again.");
+    }
+    const api = await this.#executorJson();
+    return disconnectExecutorIntegration(api, slug);
+  }
+
+  async reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult> {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      throw new Error("Sign in to erxes again.");
+    }
+    const api = await this.#executorJson();
+    return reconnectExecutorIntegration(api, slug, getExecutorUrl(this.env));
+  }
+
   async executorCredentialsExpired() {
     this.ctx.storage.kv.put("credentialsExpired", true);
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
@@ -963,6 +983,14 @@ export class ErxesUser extends WorkerEntrypoint<Env, ErxesUserProps> implements 
 
   async submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }> {
     return this.#account().submitExecutorSecret(input);
+  }
+
+  async disconnectExecutorIntegration(slug: string): Promise<void> {
+    return this.#account().disconnectExecutorIntegration(slug);
+  }
+
+  async reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult> {
+    return this.#account().reconnectExecutorIntegration(slug);
   }
 
   reconnect(): Promise<{ url: string }> {

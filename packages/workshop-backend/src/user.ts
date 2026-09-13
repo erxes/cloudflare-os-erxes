@@ -686,6 +686,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return erxes.submitExecutorSecret(input);
   }
 
+  async disconnectExecutorIntegration(slug: string): Promise<void> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) throw new Error("Sign in to erxes again.");
+    return erxes.disconnectExecutorIntegration(slug);
+  }
+
+  async reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) throw new Error("Sign in to erxes again.");
+    return erxes.reconnectExecutorIntegration(slug);
+  }
+
   /** The AI Gateway billing state (selected account + cached balance), or null if unset. */
   async getCloudflareBilling(): Promise<CloudflareBilling | null> {
     return this.storage.cloudflareBilling.get();

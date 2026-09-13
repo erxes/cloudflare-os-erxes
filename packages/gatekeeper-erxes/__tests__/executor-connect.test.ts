@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   authShorthandFromProbe,
   authenticationTemplateFromProbe,
+  disconnectExecutorIntegration,
   resolveOAuthClientForMcp,
   type ExecutorJson,
 } from "../src/executor-connect.ts";
@@ -113,5 +114,32 @@ describe("resolveOAuthClientForMcp", () => {
         supportsDynamicRegistration: true,
       }),
     ).resolves.toEqual({ client: "dcr-auth-example", clientOwner: "user" });
+  });
+});
+
+describe("disconnectExecutorIntegration", () => {
+  test("removes user connections then the integration", async () => {
+    const calls: string[] = [];
+    const api: ExecutorJson = async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (method === "GET" && path.startsWith("/api/connections")) {
+        return {
+          ok: true,
+          status: 200,
+          json: [
+            { owner: "user", name: "default", integration: "firecrawl" },
+            { owner: "org", name: "shared", integration: "firecrawl" },
+          ],
+        };
+      }
+      if (method === "DELETE") return { ok: true, status: 200, json: { removed: true } };
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    await disconnectExecutorIntegration(api, "firecrawl");
+    expect(calls).toEqual([
+      "GET /api/connections?integration=firecrawl",
+      "DELETE /api/connections/user/firecrawl/default",
+      "DELETE /api/integrations/firecrawl",
+    ]);
   });
 });

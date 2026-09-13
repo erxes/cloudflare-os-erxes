@@ -20,4 +20,6 @@ export interface ErxesGatekeeperUser extends GatekeeperUser {
   }): Promise<IntegrationCatalogRow[]>;
   beginExecutorConnect(input: BeginExecutorConnectInput): Promise<BeginExecutorConnectResult>;
   submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }>;
+  disconnectExecutorIntegration(slug: string): Promise<void>;
+  reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult>;
 }

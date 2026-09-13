@@ -397,6 +397,68 @@ export async function submitSecret(
   return { slug: input.slug };
 }
 
+function connectionRows(json: unknown): Record<string, unknown>[] {
+  const rec = asRecord(json);
+  return asArray(rec?.connections ?? json)
+    .map(asRecord)
+    .filter((row): row is Record<string, unknown> => !!row);
+}
+
+/** Drop this user's connections for the slug, then remove the integration. */
+export async function disconnectExecutorIntegration(
+  api: ExecutorJson,
+  slug: string,
+): Promise<void> {
+  const listed = await api(
+    "GET",
+    `/api/connections?integration=${encodeURIComponent(slug)}`,
+  );
+  if (listed.ok) {
+    for (const row of connectionRows(listed.json)) {
+      if (text(row.integration) && text(row.integration) !== slug) continue;
+      const owner = text(row.owner) === "org" ? "org" : "user";
+      // CF OS only creates owner:user connections.
+      if (owner !== "user") continue;
+      const name = text(row.name) || "default";
+      const del = await api(
+        "DELETE",
+        `/api/connections/${owner}/${encodeURIComponent(slug)}/${encodeURIComponent(name)}`,
+      );
+      if (!del.ok && del.status !== 404) {
+        throw new Error(`Remove connection failed (${del.status})${failureDetail(del.json)}`);
+      }
+    }
+  }
+  const rem = await api("DELETE", `/api/integrations/${encodeURIComponent(slug)}`);
+  if (!rem.ok && rem.status !== 404) {
+    throw new Error(`Remove integration failed (${rem.status})${failureDetail(rem.json)}`);
+  }
+}
+
+/** Re-run auth for an existing MCP integration (update key / OAuth). */
+export async function reconnectExecutorIntegration(
+  api: ExecutorJson,
+  slug: string,
+  executorOrigin: string,
+): Promise<BeginExecutorConnectResult> {
+  const detail = await api("GET", `/api/mcp/servers/${encodeURIComponent(slug)}`);
+  if (!detail.ok) {
+    throw new Error(`Integration not found (${detail.status}).`);
+  }
+  const body = asRecord(detail.json) ?? {};
+  const config = asRecord(body.config) ?? {};
+  const endpoint = text(config.endpoint);
+  if (!endpoint) {
+    throw new Error("This integration has no endpoint to reconnect.");
+  }
+  const name = text(body.description) || text(body.name) || slug;
+  return connectMcpTarget(
+    api,
+    { kind: "mcp", endpoint, name, slugHint: slug },
+    executorOrigin,
+  );
+}
+
 /** Run MCP connect after target is resolved. OpenAPI/GraphQL throw. */
 export async function connectMcpTarget(
   api: ExecutorJson,
