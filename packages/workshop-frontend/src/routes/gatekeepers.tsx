@@ -16,12 +16,17 @@ import { useAuthenticatedApi } from '../AuthContext'
 import { refreshGatekeeperApps } from '../useGatekeeperApps'
 import { EmptyState } from '../components/EmptyState'
 import ConnectConnectorModal from '../components/ConnectConnectorModal'
+import { AddExecutorIntegrationModal } from '../components/AddExecutorIntegrationModal'
 import {
   AccountDescription,
   SupportedResource,
   VendorDescription,
 } from '@gadgets/workshop-shared/gatekeeper'
-import { GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
+import {
+  ExecutorIntegrationInfo,
+  GatekeeperVendorInfo,
+  IntegrationCatalogRow,
+} from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useSiteName } from '../ServerConfigContext'
 import { AccountsSubscriberAdapter } from '../accountsSubscriber'
@@ -462,6 +467,11 @@ function ConnectorsPage() {
   // only difference is that confirming adds the account directly (no OAuth redirect).
   const [addable, setAddable] = useState<GatekeeperVendorInfo[]>([])
   const [loadError, setLoadError] = useState(false)
+  const [executorIntegrations, setExecutorIntegrations] = useState<ExecutorIntegrationInfo[]>([])
+  const [catalogPreview, setCatalogPreview] = useState<IntegrationCatalogRow[]>([])
+  const [integrationSearch, setIntegrationSearch] = useState('')
+  const [integrationKind, setIntegrationKind] = useState<'' | 'mcp' | 'openapi' | 'graphql'>('')
+  const [connectIntegrationOpen, setConnectIntegrationOpen] = useState(false)
 
   const [modalTarget, setModalTarget] = useState<ModalTarget>(null)
   const [connecting, setConnecting] = useState(false)
@@ -549,6 +559,46 @@ function ConnectorsPage() {
       subscription[Symbol.dispose]()
     }
   }, [authenticatedApi])
+
+  const refreshExecutorIntegrations = () => {
+    authenticatedApi
+      .listExecutorIntegrations()
+      .then(setExecutorIntegrations)
+      .catch((err) => logRpcFailure('Failed to load Executor integrations:', err))
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    authenticatedApi
+      .listExecutorIntegrations()
+      .then((list) => {
+        if (!cancelled) setExecutorIntegrations(list)
+      })
+      .catch((err) => logRpcFailure('Failed to load Executor integrations:', err))
+    return () => {
+      cancelled = true
+    }
+  }, [authenticatedApi])
+
+  useEffect(() => {
+    let cancelled = false
+    const t = setTimeout(() => {
+      authenticatedApi
+        .listIntegrationCatalog({
+          q: integrationSearch.trim() || undefined,
+          kind: integrationKind || undefined,
+          limit: 24,
+        })
+        .then((surface) => {
+          if (!cancelled) setCatalogPreview(surface.entries)
+        })
+        .catch((err) => logRpcFailure('Failed to load integration catalog:', err))
+    }, 200)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+  }, [authenticatedApi, integrationSearch, integrationKind])
 
   const handleOpenConnect = (vendorId: string) => {
     setModalTarget({ kind: 'connect', vendorId })
@@ -720,15 +770,132 @@ function ConnectorsPage() {
         <header className="mb-8 grid gap-8 lg:grid-cols-[minmax(0,540px)_444px] lg:items-center lg:justify-between">
           <div>
             <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-kumo-default sm:text-[34px]">
-              Gatekeepers
+              Integrations
             </h1>
             <p className="mt-2 text-[14px] leading-[20px] font-normal tracking-[-0.25px] text-kumo-subtle">
-              Add the apps and accounts your workspaces can use. Connect once, then wire
-              them into anything you build.
+              Connect tools for your agent from the catalog. CF OS connectors stay below.
             </p>
           </div>
           <ConnectorsHeroDiagram accounts={accounts} vendors={vendors} siteName={siteName} />
         </header>
+
+        <section className="mb-12">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <SectionEyebrow
+              label="Integrations"
+              count={executorIntegrations.filter((i) => i.connected).length || undefined}
+            />
+            <button
+              type="button"
+              onClick={() => setConnectIntegrationOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-kumo-line bg-kumo-base px-3 py-1.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default hover:bg-kumo-inset"
+            >
+              <Plus size={14} />
+              Connect
+            </button>
+          </div>
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[200px] flex-1">
+              <MagnifyingGlass
+                size={14}
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
+              />
+              <input
+                type="search"
+                value={integrationSearch}
+                onChange={(e) => setIntegrationSearch(e.target.value)}
+                placeholder="Search integrations…"
+                className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-8 pr-3 text-[13px] text-kumo-default placeholder:text-kumo-inactive focus:border-kumo-ring focus:outline-none"
+              />
+            </div>
+            {(
+              [
+                ['', 'All'],
+                ['mcp', 'MCP'],
+                ['openapi', 'API'],
+                ['graphql', 'GraphQL'],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={label}
+                type="button"
+                onClick={() => setIntegrationKind(id)}
+                className={`rounded-md px-2.5 py-1 text-[12px] ${
+                  integrationKind === id
+                    ? 'bg-kumo-brand text-white'
+                    : 'border border-kumo-line text-kumo-subtle hover:bg-kumo-inset'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {executorIntegrations.filter((i) => i.connected).length > 0 && (
+            <div className={`${sectionGridClass} mb-6`}>
+              {executorIntegrations
+                .filter((i) => i.connected)
+                .map((row) => (
+                  <div
+                    key={row.slug}
+                    className="flex items-center gap-3 rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3"
+                  >
+                    <div className="flex size-10 items-center justify-center rounded-xl bg-kumo-inset text-[13px] font-medium text-kumo-subtle">
+                      {(row.name[0] || '?').toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[14px] font-medium text-kumo-default">
+                        {row.name}
+                      </div>
+                      <div className="truncate text-[12px] text-kumo-subtle">
+                        {row.kind.toUpperCase()} · connected
+                      </div>
+                    </div>
+                    <span className="size-2 rounded-full bg-emerald-500" aria-hidden />
+                  </div>
+                ))}
+            </div>
+          )}
+          <div className={sectionGridClass}>
+            {catalogPreview.map((row) => {
+              const connected = executorIntegrations.some(
+                (i) =>
+                  i.connected &&
+                  (i.displayUrl === row.endpoint ||
+                    i.name.toLowerCase() === row.name.toLowerCase()),
+              )
+              return (
+                <button
+                  key={row.id}
+                  type="button"
+                  onClick={() => setConnectIntegrationOpen(true)}
+                  className="flex items-center gap-3 rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3 text-left themed-card-hover-shadow"
+                >
+                  {row.iconUrl ? (
+                    <img src={row.iconUrl} alt="" className="size-10 rounded-xl" />
+                  ) : (
+                    <div className="flex size-10 items-center justify-center rounded-xl bg-kumo-inset text-[13px] font-medium text-kumo-subtle">
+                      {(row.name[0] || '?').toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[14px] font-medium text-kumo-default">
+                      {row.name}
+                    </div>
+                    <div className="truncate text-[12px] text-kumo-subtle">
+                      {row.kind.toUpperCase()}
+                      {connected ? ' · connected' : ''}
+                    </div>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+          {catalogPreview.length === 0 && (
+            <p className="mt-2 text-[13px] text-kumo-subtle">
+              Sign in with erxes to browse the catalog, or open Connect to paste an MCP URL.
+            </p>
+          )}
+        </section>
 
         <div className="mb-6 flex items-center gap-3">
           <div className="relative flex-1">
@@ -740,12 +907,14 @@ function ConnectorsPage() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search gatekeepers…"
+              placeholder="Search connectors…"
               className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
             />
           </div>
           <ViewToggle view={view} onChange={setView} />
         </div>
+
+        <SectionEyebrow label="Connectors" />
 
         {loadError && (
           <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-6 text-center">
@@ -834,19 +1003,26 @@ function ConnectorsPage() {
             <EmptyState
               title={
                 search
-                  ? 'No gatekeepers match'
-                  : 'No gatekeepers yet'
+                  ? 'No connectors match'
+                  : 'No connectors yet'
               }
               description={
                 search
                   ? "We couldn't find anything matching your search."
-                  : 'Gatekeepers will appear here as they become available in your workspace.'
+                  : 'CF OS connectors will appear here as they become available in your workspace.'
               }
               icon={Plugs}
             />
           )}
 
       </div>
+
+      <AddExecutorIntegrationModal
+        open={connectIntegrationOpen}
+        onOpenChange={setConnectIntegrationOpen}
+        connected={executorIntegrations}
+        onConnected={refreshExecutorIntegrations}
+      />
 
       {activeVendor && (
         <ConnectConnectorModal
