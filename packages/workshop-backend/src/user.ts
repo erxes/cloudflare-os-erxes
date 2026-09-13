@@ -1,8 +1,9 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ExecutorIntegrationInfo, IntegrationCatalogQuery, IntegrationCatalogSurface, BeginExecutorConnectInput, BeginExecutorConnectResult, SubmitExecutorSecretInput, SubmitExecutorSecretResult } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
+import { ErxesGatekeeperUser } from "@gadgets/workshop-shared/erxes-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
@@ -633,6 +634,56 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return null;
+  }
+
+  async getErxesGatekeeperAccount(): Promise<Fetcher<ErxesGatekeeperUser> | null> {
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let rec: ConnectedAccountRecord | undefined;
+      try { rec = this.storage.connectedAccounts.get(id); } catch { continue; }
+      if (rec && rec.vendorId === ERXES_VENDOR_ID) {
+        return rec.account as unknown as Fetcher<ErxesGatekeeperUser>;
+      }
+    }
+    return null;
+  }
+
+  async listExecutorIntegrations(): Promise<ExecutorIntegrationInfo[]> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) return [];
+    try {
+      return await erxes.listExecutorIntegrations();
+    } catch {
+      return [];
+    }
+  }
+
+  async listIntegrationCatalog(
+    query?: IntegrationCatalogQuery,
+  ): Promise<IntegrationCatalogSurface> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) return { fetchedAt: 0, stale: true, entries: [] };
+    try {
+      return await erxes.listIntegrationCatalog(query);
+    } catch {
+      return { fetchedAt: 0, stale: true, entries: [] };
+    }
+  }
+
+  async beginExecutorConnect(
+    input: BeginExecutorConnectInput,
+  ): Promise<BeginExecutorConnectResult> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) return { status: "needs_erxes" };
+    return erxes.beginExecutorConnect(input);
+  }
+
+  async submitExecutorSecret(
+    input: SubmitExecutorSecretInput,
+  ): Promise<SubmitExecutorSecretResult> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) return { status: "needs_erxes" };
+    return erxes.submitExecutorSecret(input);
   }
 
   /** The AI Gateway billing state (selected account + cached balance), or null if unset. */
