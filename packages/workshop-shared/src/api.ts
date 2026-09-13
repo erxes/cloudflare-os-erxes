@@ -557,6 +557,28 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]>;
 
+  /** Tenant Executor integrations. Soft-empty when erxes is missing or Executor is down. */
+  listExecutorIntegrations(): Promise<ExecutorIntegrationInfo[]>;
+
+  /**
+   * Searchable slice of the integrations.sh catalog (proxied via erxes). Soft-empty without erxes.
+   * Filtered server-side; default limit ~80; cli rows dropped.
+   */
+  listIntegrationCatalog(query?: {
+    q?: string;
+    kind?: ExecutorIntegrationKind;
+    limit?: number;
+  }): Promise<IntegrationCatalogRow[]>;
+
+  /**
+   * Resolve catalog/detect/manual into a created Executor integration and start auth.
+   * MCP-only create in v1; openapi/graphql throw a clear "not supported yet" error.
+   */
+  beginExecutorConnect(input: BeginExecutorConnectInput): Promise<BeginExecutorConnectResult>;
+
+  /** Finish a needs_secret result from beginExecutorConnect. */
+  submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }>;
+
   /**
    * Opt into an ambient gatekeeper: mint its connected account for this user (no OAuth flow). Only
    * works while the vendor's mode is 'optional' (or 'enabled') and the user has no account yet; the
@@ -826,6 +848,97 @@ export type GatekeeperVendorInfo = {
    */
   unavailable?: boolean;
 };
+
+/** Executor plugin kinds surfaced in CF OS Integrations. */
+export type ExecutorIntegrationKind = "mcp" | "openapi" | "graphql";
+
+/** Tenant Executor integration with connected overlay. */
+export type ExecutorIntegrationInfo = {
+  slug: string;
+  name: string;
+  description: string;
+  kind: ExecutorIntegrationKind;
+  displayUrl?: string;
+  connected: boolean;
+};
+
+/** One integrations.sh surface projected for browse. */
+export type IntegrationCatalogRow = {
+  id: string;
+  name: string;
+  description: string;
+  kind: ExecutorIntegrationKind;
+  endpoint?: string;
+  iconUrl?: string;
+  domain?: string;
+  featured?: boolean;
+};
+
+export type IntegrationCatalogSurface = {
+  fetchedAt: number;
+  stale: boolean;
+  entries: IntegrationCatalogRow[];
+};
+
+export type IntegrationCatalogQuery = {
+  q?: string;
+  kind?: ExecutorIntegrationKind;
+  limit?: number;
+};
+
+export type BeginExecutorConnectInput =
+  | { source: "catalog"; catalogId: string }
+  | { source: "detect"; url: string }
+  | {
+      source: "manual";
+      kind: ExecutorIntegrationKind;
+      endpoint: string;
+      name?: string;
+    };
+
+export type ExecutorSecretTemplate = {
+  id: string;
+  label: string;
+  kind: "apikey" | "header" | "none";
+  fields: { name: string; label: string; secret?: boolean }[];
+};
+
+export type BeginExecutorConnectResult =
+  | { status: "connected"; slug: string }
+  | {
+      status: "needs_oauth";
+      slug: string;
+      authorizationUrl: string;
+      state: string;
+    }
+  | {
+      status: "needs_secret";
+      slug: string;
+      template: ExecutorSecretTemplate;
+    }
+  | { status: "needs_erxes" }
+  | { status: "needs_choice"; candidates: ExecutorDetectCandidate[] }
+  | { status: "unsupported_kind"; kind: ExecutorIntegrationKind }
+  | { status: "error"; message: string };
+
+export type ExecutorDetectCandidate = {
+  kind: ExecutorIntegrationKind;
+  confidence: "high" | "medium" | "low";
+  endpoint: string;
+  name: string;
+  slug: string;
+};
+
+export type SubmitExecutorSecretInput = {
+  slug: string;
+  template: string;
+  value: string;
+};
+
+export type SubmitExecutorSecretResult =
+  | { status: "connected"; slug: string }
+  | { status: "needs_erxes" }
+  | { status: "error"; message: string };
 
 /** Maximum length (characters) of the admin-authored agent system-prompt instructions. */
 export const MAX_INSTANCE_INSTRUCTIONS_LENGTH = 8000;
