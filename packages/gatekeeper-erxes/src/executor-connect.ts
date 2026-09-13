@@ -85,19 +85,25 @@ export function resolveFromCatalog(
 
 export type EnsureMcpResult = { slug: string; probe: Record<string, unknown> };
 
-function authTemplateFromProbe(probe: Record<string, unknown>): unknown[] {
-  if (probe.requiresOAuth === true) {
-    return [{ kind: "oauth", authorizationUrl: "", tokenUrl: "", scopes: [] }];
-  }
+/** Executor `auth` shorthand on addServer — not the UI editor dialect. */
+export function authShorthandFromProbe(
+  probe: Record<string, unknown>,
+):
+  | { kind: "none" }
+  | { kind: "oauth2" }
+  | { kind: "header"; headerName: string; prefix: string } {
+  if (probe.requiresOAuth === true) return { kind: "oauth2" };
   if (probe.requiresAuthentication === true) {
-    return [
-      {
-        kind: "apikey",
-        placements: [{ carrier: "header", name: "Authorization", prefix: "Bearer " }],
-      },
-    ];
+    return { kind: "header", headerName: "Authorization", prefix: "Bearer " };
   }
-  return [{ kind: "none" }];
+  return { kind: "none" };
+}
+
+function failureDetail(json: unknown): string {
+  const rec = asRecord(json);
+  if (!rec) return "";
+  const msg = text(rec.message) || text(rec.error) || text(asRecord(rec.error)?.message);
+  return msg ? `: ${msg}` : "";
 }
 
 function slugify(raw: string): string {
@@ -124,7 +130,7 @@ export async function ensureMcpIntegrationWithProbe(
     endpoint: target.endpoint,
     slug,
     remoteTransport: "auto",
-    authenticationTemplate: authTemplateFromProbe(probeBody),
+    auth: authShorthandFromProbe(probeBody),
   });
   if (created.ok) {
     return { slug: text(asRecord(created.json)?.slug) || slug, probe: probeBody };
@@ -137,7 +143,7 @@ export async function ensureMcpIntegrationWithProbe(
       .find((row) => row && text(row.displayUrl) === target.endpoint);
     return { slug: text(match?.slug) || slug, probe: probeBody };
   }
-  throw new Error(`Create MCP server failed (${created.status}).`);
+  throw new Error(`Create MCP server failed (${created.status})${failureDetail(created.json)}`);
 }
 
 function secretTemplateFromAuthMethod(method: Record<string, unknown>): ExecutorSecretTemplate {
