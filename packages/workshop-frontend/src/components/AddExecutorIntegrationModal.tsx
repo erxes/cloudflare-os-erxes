@@ -70,6 +70,7 @@ async function handleConnectResult(
     listIntegrations: () => Promise<ExecutorIntegrationInfo[]>
     onConnected: () => void
     onNeedsSecret: (slug: string, templateId: string, label: string) => void
+    onNeedsOauth: (slug: string, authorizationUrl: string) => void
     onError: (message: string) => void
   },
 ) {
@@ -77,20 +78,9 @@ async function handleConnectResult(
     case 'connected':
       opts.onConnected()
       return
-    case 'needs_oauth': {
-      const popup = window.open(
-        result.authorizationUrl,
-        'executor-oauth',
-        'popup=1,width=640,height=760',
-      )
-      const ok = await pollUntilConnected(opts.listIntegrations, result.slug, popup)
-      if (ok) {
-        opts.onConnected()
-      } else {
-        opts.onError('OAuth did not finish. Complete consent in the popup, then try again.')
-      }
+    case 'needs_oauth':
+      opts.onNeedsOauth(result.slug, result.authorizationUrl)
       return
-    }
     case 'needs_secret':
       opts.onNeedsSecret(result.slug, result.template.id, result.template.label)
       return
@@ -116,6 +106,7 @@ export function AddExecutorIntegrationModal({
     null,
   )
   const [secretValue, setSecretValue] = useState('')
+  const [oauth, setOauth] = useState<{ slug: string; authorizationUrl: string } | null>(null)
 
   const connectedByEndpoint = useMemo(() => {
     const map = new Map<string, ExecutorIntegrationInfo>()
@@ -153,27 +144,63 @@ export function AddExecutorIntegrationModal({
       setError(null)
       setSecret(null)
       setSecretValue('')
+      setOauth(null)
       setQ('')
       setKind('')
       setCatalog(null)
     }
   }, [open])
 
+  const finishConnected = () => {
+    onConnected()
+    onOpenChange(false)
+  }
+
   const runHandlers = {
     listIntegrations: () => authenticatedApi.listExecutorIntegrations(),
-    onConnected: () => {
-      onConnected()
-      onOpenChange(false)
-    },
+    onConnected: finishConnected,
     onNeedsSecret: (slug: string, templateId: string, label: string) => {
+      setOauth(null)
       setSecret({ slug, template: templateId, label })
     },
+    onNeedsOauth: (slug: string, authorizationUrl: string) => {
+      setSecret(null)
+      setOauth({ slug, authorizationUrl })
+    },
     onError: (message: string) => setError(message),
+  }
+
+  const continueOauth = async () => {
+    if (!oauth) return
+    setBusy(true)
+    setError(null)
+    const popup = window.open(
+      oauth.authorizationUrl,
+      'executor-oauth',
+      'popup=1,width=640,height=760',
+    )
+    if (!popup) {
+      setBusy(false)
+      setError('Popup blocked. Allow popups for this site, then click Continue with OAuth.')
+      return
+    }
+    try {
+      const ok = await pollUntilConnected(
+        () => authenticatedApi.listExecutorIntegrations(),
+        oauth.slug,
+        popup,
+      )
+      if (ok) finishConnected()
+      else setError('OAuth did not finish. Complete consent in the popup, then try again.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const connectCatalogRow = async (row: IntegrationCatalogRow) => {
     setBusy(true)
     setError(null)
+    setOauth(null)
     try {
       const result = await authenticatedApi.beginExecutorConnect({
         source: 'catalog',
@@ -189,7 +216,7 @@ export function AddExecutorIntegrationModal({
   }
 
   useEffect(() => {
-    if (!open || !initialCatalogId || busy || secret) return
+    if (!open || !initialCatalogId || busy || secret || oauth) return
     let cancelled = false
     void (async () => {
       setBusy(true)
@@ -200,17 +227,7 @@ export function AddExecutorIntegrationModal({
           catalogId: initialCatalogId,
         })
         if (cancelled) return
-        await handleConnectResult(result, {
-          listIntegrations: () => authenticatedApi.listExecutorIntegrations(),
-          onConnected: () => {
-            onConnected()
-            onOpenChange(false)
-          },
-          onNeedsSecret: (slug, templateId, label) => {
-            setSecret({ slug, template: templateId, label })
-          },
-          onError: (message) => setError(message),
-        })
+        await handleConnectResult(result, runHandlers)
       } catch (err) {
         if (cancelled) return
         logRpcFailure('beginExecutorConnect failed:', err)
@@ -231,6 +248,7 @@ export function AddExecutorIntegrationModal({
     if (!trimmed) return
     setBusy(true)
     setError(null)
+    setOauth(null)
     try {
       if (looksLikeUrl(trimmed)) {
         const result = await authenticatedApi.beginExecutorConnect({
@@ -259,8 +277,7 @@ export function AddExecutorIntegrationModal({
         template: secret.template,
         value: secretValue.trim(),
       })
-      onConnected()
-      onOpenChange(false)
+      finishConnected()
     } catch (err) {
       logRpcFailure('submitExecutorSecret failed:', err)
       setError(err instanceof Error ? err.message : 'Save secret failed.')
@@ -296,7 +313,28 @@ export function AddExecutorIntegrationModal({
           </div>
 
           <div className="new-gatekeeper-scroll-balanced flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
-            {secret ? (
+            {oauth ? (
+              <div className="flex flex-col gap-3">
+                <p className="text-[13px] text-kumo-subtle">
+                  Sign in to finish connecting{' '}
+                  <span className="text-kumo-default">{oauth.slug}</span>.
+                </p>
+                {error && <p className="text-[12px] text-red-600">{error}</p>}
+                <WorkshopButton disabled={busy} onClick={() => void continueOauth()}>
+                  {busy ? 'Waiting for sign-in…' : 'Continue with OAuth'}
+                </WorkshopButton>
+                <button
+                  type="button"
+                  className="text-left text-[12px] text-kumo-subtle underline"
+                  onClick={() => {
+                    setOauth(null)
+                    setError(null)
+                  }}
+                >
+                  Back to catalog
+                </button>
+              </div>
+            ) : secret ? (
               <div className="flex flex-col gap-3">
                 <p className="text-[13px] text-kumo-subtle">
                   Enter the secret for <span className="text-kumo-default">{secret.slug}</span> (

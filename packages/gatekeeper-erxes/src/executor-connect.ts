@@ -158,12 +158,112 @@ function secretTemplateFromAuthMethod(method: Record<string, unknown>): Executor
   };
 }
 
+function oauthClientRows(json: unknown): Record<string, unknown>[] {
+  const rec = asRecord(json);
+  const rows = asArray(rec?.clients ?? json);
+  return rows.map(asRecord).filter((row): row is Record<string, unknown> => !!row);
+}
+
+function dcrClientSlug(issuerOrEndpoint: string): string {
+  try {
+    const host = new URL(issuerOrEndpoint).hostname.toLowerCase();
+    const base = host.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    return `dcr-${base || "authorization-server"}`;
+  } catch {
+    return "dcr-authorization-server";
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return asArray(value).map(text).filter(Boolean);
+}
+
+type ResolvedOAuthClient = { client: string; clientOwner: "user" | "org" };
+
+/** Prefer an existing DCR client for this integration; otherwise register via RFC 7591. */
+export async function resolveOAuthClientForMcp(
+  api: ExecutorJson,
+  opts: {
+    slug: string;
+    discoveryUrl: string;
+    redirectUri: string;
+    supportsDynamicRegistration: boolean;
+  },
+): Promise<ResolvedOAuthClient> {
+  const clients = oauthClientRows((await api("GET", "/api/oauth/clients")).json);
+
+  const existingDcr = clients.find((row) => {
+    const origin = asRecord(row.origin);
+    return (
+      text(origin?.kind) === "dynamic_client_registration" &&
+      text(origin?.integration) === opts.slug
+    );
+  });
+  if (existingDcr) {
+    return {
+      client: text(existingDcr.slug),
+      clientOwner: text(existingDcr.owner) === "org" ? "org" : "user",
+    };
+  }
+
+  if (opts.supportsDynamicRegistration || clients.length === 0) {
+    const probe = await api("POST", "/api/oauth/probe", { url: opts.discoveryUrl });
+    if (probe.ok) {
+      const body = asRecord(probe.json) ?? {};
+      const registrationEndpoint = text(body.registrationEndpoint);
+      if (registrationEndpoint && text(body.authorizationUrl) && text(body.tokenUrl)) {
+        const slug = dcrClientSlug(text(body.issuer) || registrationEndpoint);
+        const scopes = stringList(body.scopesSupported);
+        const registered = await api("POST", "/api/oauth/clients/register-dynamic", {
+          owner: "user",
+          slug,
+          issuer: text(body.issuer) || null,
+          registrationEndpoint,
+          authorizationUrl: text(body.authorizationUrl),
+          tokenUrl: text(body.tokenUrl),
+          resource: text(body.resource) || opts.discoveryUrl,
+          scopes,
+          tokenEndpointAuthMethodsSupported: stringList(body.tokenEndpointAuthMethodsSupported),
+          clientName: "Executor",
+          redirectUri: opts.redirectUri,
+          originIntegration: opts.slug,
+        });
+        if (registered.ok) {
+          return {
+            client: text(asRecord(registered.json)?.client) || slug,
+            clientOwner: "user",
+          };
+        }
+        if (registered.status === 409) {
+          return { client: slug, clientOwner: "user" };
+        }
+        throw new Error(
+          `OAuth client registration failed (${registered.status})${failureDetail(registered.json)}`,
+        );
+      }
+    }
+  }
+
+  const fallback = clients[0];
+  if (fallback) {
+    return {
+      client: text(fallback.slug),
+      clientOwner: text(fallback.owner) === "org" ? "org" : "user",
+    };
+  }
+
+  throw new Error(
+    "This MCP needs OAuth. Automatic registration failed — open Executor and add an OAuth app, then try again.",
+  );
+}
+
 export async function startAuthForSlug(
   api: ExecutorJson,
   opts: {
     slug: string;
     probe: Record<string, unknown>;
     executorOrigin: string;
+    discoveryUrl: string;
   },
 ): Promise<BeginExecutorConnectResult> {
   const requiresAuth = opts.probe.requiresAuthentication === true;
@@ -196,28 +296,31 @@ export async function startAuthForSlug(
     });
 
   if (requiresOAuth || oauthMethod) {
-    const clientsRes = await api("GET", "/api/oauth/clients");
-    const clients = asArray(clientsRes.json);
-    const first = asRecord(clients[0]);
-    if (!first) {
-      throw new Error(
-        "This MCP needs OAuth. Register an OAuth app in Executor once, then Connect again.",
-      );
-    }
+    const redirectUri = `${opts.executorOrigin.replace(/\/$/, "")}/api/oauth/callback`;
+    const discoveryUrl =
+      text(asRecord(oauthMethod?.oauth)?.discoveryUrl) || opts.discoveryUrl;
+    const resolved = await resolveOAuthClientForMcp(api, {
+      slug: opts.slug,
+      discoveryUrl,
+      redirectUri,
+      supportsDynamicRegistration:
+        opts.probe.supportsDynamicRegistration === true ||
+        asRecord(oauthMethod?.oauth)?.supportsDynamicRegistration === true,
+    });
     const template =
-      text(oauthMethod?.template) || text(oauthMethod?.id) || text(oauthMethod?.slug) || "oauth";
+      text(oauthMethod?.template) || text(oauthMethod?.id) || text(oauthMethod?.slug) || "oauth2";
     const start = await api("POST", "/api/oauth/start", {
-      client: text(first.slug) || text(first.client),
-      clientOwner: text(first.owner) || "org",
+      client: resolved.client,
+      clientOwner: resolved.clientOwner,
       owner: "user",
       name: "default",
       integration: opts.slug,
       template,
       newConnection: true,
-      redirectUri: `${opts.executorOrigin.replace(/\/$/, "")}/api/oauth/callback`,
+      redirectUri,
     });
     if (!start.ok) {
-      throw new Error(`OAuth start failed (${start.status}).`);
+      throw new Error(`OAuth start failed (${start.status})${failureDetail(start.json)}`);
     }
     const body = asRecord(start.json) ?? {};
     if (text(body.status) === "connected") {
@@ -276,5 +379,6 @@ export async function connectMcpTarget(
     slug: ensured.slug,
     probe: ensured.probe,
     executorOrigin,
+    discoveryUrl: target.endpoint,
   });
 }

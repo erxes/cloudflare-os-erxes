@@ -785,7 +785,7 @@ export class ErxesLoginAccount extends DurableObject<Env> {
 
   async #loadCatalogEntries(): Promise<{ fetchedAt: number; entries: IntegrationCatalogRow[] }> {
     const cached = this.ctx.storage.kv.get<{ fetchedAt: number; entries: IntegrationCatalogRow[] }>(
-      "integrationsShCatalog",
+      "integrationsShCatalog.v2",
     );
     if (cached && Date.now() - cached.fetchedAt < CATALOG_CACHE_TTL_MS) {
       return cached;
@@ -798,7 +798,7 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     const envelope = await res.json();
     const entries = normalizeIntegrationsShCatalog(envelope);
     const next = { fetchedAt: Date.now(), entries };
-    this.ctx.storage.kv.put("integrationsShCatalog", next);
+    this.ctx.storage.kv.put("integrationsShCatalog.v2", next);
     return next;
   }
 
