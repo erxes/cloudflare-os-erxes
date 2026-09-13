@@ -557,6 +557,39 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]>;
 
+  /** Tenant Executor integrations. Soft-empty when erxes is missing or Executor is down. */
+  listExecutorIntegrations(): Promise<ExecutorIntegrationInfo[]>;
+
+  /**
+   * Searchable slice of the integrations.sh catalog (proxied via erxes). Soft-empty without erxes.
+   * Filtered server-side; default limit ~80; cli rows dropped.
+   */
+  listIntegrationCatalog(query?: {
+    q?: string;
+    kind?: ExecutorIntegrationKind;
+    limit?: number;
+  }): Promise<IntegrationCatalogRow[]>;
+
+  /**
+   * Resolve catalog/detect/manual into a created Executor integration and start auth.
+   * MCP-only create in v1; openapi/graphql throw a clear "not supported yet" error.
+   */
+  beginExecutorConnect(input: BeginExecutorConnectInput): Promise<BeginExecutorConnectResult>;
+
+  /** Finish a needs_secret result from beginExecutorConnect. */
+  submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }>;
+
+  /**
+   * Remove this user's Executor connection(s) for `slug` and delete the integration.
+   * Soft no-op pieces (404) are fine; throws on hard failures.
+   */
+  disconnectExecutorIntegration(slug: string): Promise<void>;
+
+  /**
+   * Re-enter auth for an existing Executor integration (update API key / OAuth).
+   */
+  reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult>;
+
   /**
    * Opt into an ambient gatekeeper: mint its connected account for this user (no OAuth flow). Only
    * works while the vendor's mode is 'optional' (or 'enabled') and the user has no account yet; the
@@ -825,6 +858,71 @@ export type GatekeeperVendorInfo = {
    * not offer it as connectable.
    */
   unavailable?: boolean;
+};
+
+/** Executor plugin kinds surfaced in CF OS Integrations. */
+export type ExecutorIntegrationKind = "mcp" | "openapi" | "graphql";
+
+/** Tenant Executor integration with connected overlay. */
+export type ExecutorIntegrationInfo = {
+  slug: string;
+  name: string;
+  description: string;
+  kind: ExecutorIntegrationKind;
+  displayUrl?: string;
+  connected: boolean;
+};
+
+/** One integrations.sh row projected for browse. Not an Executor slug yet. */
+export type IntegrationCatalogRow = {
+  id: string;
+  name: string;
+  description: string;
+  kind: ExecutorIntegrationKind;
+  endpoint: string;
+  iconUrl?: string;
+  featured?: boolean;
+};
+
+export type BeginExecutorConnectInput =
+  | { source: "catalog"; catalogId: string }
+  | { source: "detect"; url: string }
+  | {
+      source: "manual";
+      kind: ExecutorIntegrationKind;
+      endpoint: string;
+      name?: string;
+    };
+
+export type ExecutorSecretTemplate = {
+  id: string;
+  label: string;
+  kind: "apikey" | "header" | "none";
+  fields: { name: string; label: string; secret?: boolean }[];
+};
+
+export type BeginExecutorConnectResult =
+  | { status: "connected"; slug: string }
+  | {
+      status: "needs_oauth";
+      slug: string;
+      authorizationUrl: string;
+      state: string;
+    }
+  | {
+      status: "needs_secret";
+      slug: string;
+      template: ExecutorSecretTemplate;
+      /** When true, probe said the server works without a key (e.g. Firecrawl keyless). */
+      optional?: boolean;
+      displayName?: string;
+    };
+
+export type SubmitExecutorSecretInput = {
+  slug: string;
+  template: string;
+  // ponytail: single-string value covers apikey/header v1; multi-field forms upgrade to values: Record<string,string>
+  value: string;
 };
 
 /** Maximum length (characters) of the admin-authored agent system-prompt instructions. */

@@ -1,8 +1,9 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ExecutorIntegrationInfo, ExecutorIntegrationKind, IntegrationCatalogRow, BeginExecutorConnectInput, BeginExecutorConnectResult, SubmitExecutorSecretInput } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
+import { ErxesGatekeeperUser } from "@gadgets/workshop-shared/erxes-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
@@ -633,6 +634,68 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return null;
+  }
+
+  async getErxesGatekeeperAccount(): Promise<Fetcher<ErxesGatekeeperUser> | null> {
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let rec: ConnectedAccountRecord | undefined;
+      try { rec = this.storage.connectedAccounts.get(id); } catch { continue; }
+      if (rec && rec.vendorId === ERXES_VENDOR_ID) {
+        return rec.account as unknown as Fetcher<ErxesGatekeeperUser>;
+      }
+    }
+    return null;
+  }
+
+  async listExecutorIntegrations(): Promise<ExecutorIntegrationInfo[]> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) return [];
+    try {
+      return await erxes.listExecutorIntegrations();
+    } catch {
+      return [];
+    }
+  }
+
+  async listIntegrationCatalog(query?: {
+    q?: string;
+    kind?: ExecutorIntegrationKind;
+    limit?: number;
+  }): Promise<IntegrationCatalogRow[]> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) return [];
+    try {
+      return await erxes.listIntegrationCatalog(query);
+    } catch {
+      return [];
+    }
+  }
+
+  async beginExecutorConnect(
+    input: BeginExecutorConnectInput,
+  ): Promise<BeginExecutorConnectResult> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) throw new Error("Sign in to erxes again.");
+    return erxes.beginExecutorConnect(input);
+  }
+
+  async submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) throw new Error("Sign in to erxes again.");
+    return erxes.submitExecutorSecret(input);
+  }
+
+  async disconnectExecutorIntegration(slug: string): Promise<void> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) throw new Error("Sign in to erxes again.");
+    return erxes.disconnectExecutorIntegration(slug);
+  }
+
+  async reconnectExecutorIntegration(slug: string): Promise<BeginExecutorConnectResult> {
+    const erxes = await this.getErxesGatekeeperAccount();
+    if (!erxes) throw new Error("Sign in to erxes again.");
+    return erxes.reconnectExecutorIntegration(slug);
   }
 
   /** The AI Gateway billing state (selected account + cached balance), or null if unset. */
