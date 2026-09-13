@@ -902,6 +902,9 @@ export type BeginExecutorConnectResult =
       status: "needs_secret";
       slug: string;
       template: ExecutorSecretTemplate;
+      /** When true, probe said the server works without a key (e.g. Firecrawl keyless). */
+      optional?: boolean;
+      displayName?: string;
     };
 
 export type SubmitExecutorSecretInput = {

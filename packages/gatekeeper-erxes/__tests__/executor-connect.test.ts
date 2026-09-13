@@ -1,9 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import {
   authShorthandFromProbe,
+  authenticationTemplateFromProbe,
   resolveOAuthClientForMcp,
   type ExecutorJson,
 } from "../src/executor-connect.ts";
+
+describe("authenticationTemplateFromProbe", () => {
+  test("open servers declare none plus optional API key", () => {
+    expect(authenticationTemplateFromProbe({})).toEqual([
+      { kind: "none" },
+      {
+        type: "apiKey",
+        label: "API key",
+        headers: {
+          Authorization: ["Bearer ", { type: "variable", name: "token" }],
+        },
+      },
+    ]);
+  });
+
+  test("oauth only when required", () => {
+    expect(authenticationTemplateFromProbe({ requiresOAuth: true })).toEqual([
+      { kind: "oauth2" },
+    ]);
+  });
+});
 
 describe("authShorthandFromProbe", () => {
   test("oauth wins over bearer", () => {

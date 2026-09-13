@@ -85,7 +85,22 @@ export function resolveFromCatalog(
 
 export type EnsureMcpResult = { slug: string; probe: Record<string, unknown> };
 
-/** Executor `auth` shorthand on addServer — not the UI editor dialect. */
+const BEARER_API_KEY_TEMPLATE = {
+  type: "apiKey" as const,
+  label: "API key",
+  headers: {
+    Authorization: ["Bearer ", { type: "variable" as const, name: "token" }],
+  },
+};
+
+/** Declared auth methods for addServer — open servers get none + optional bearer. */
+export function authenticationTemplateFromProbe(probe: Record<string, unknown>): unknown[] {
+  if (probe.requiresOAuth === true) return [{ kind: "oauth2" }];
+  if (probe.requiresAuthentication === true) return [BEARER_API_KEY_TEMPLATE];
+  return [{ kind: "none" }, BEARER_API_KEY_TEMPLATE];
+}
+
+/** @deprecated prefer authenticationTemplateFromProbe — kept for unit tests of shorthand mapping. */
 export function authShorthandFromProbe(
   probe: Record<string, unknown>,
 ):
@@ -110,13 +125,20 @@ function slugify(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "mcp";
 }
 
+const OPTIONAL_API_KEY_TEMPLATE: ExecutorSecretTemplate = {
+  id: "header",
+  label: "API key",
+  kind: "apikey",
+  fields: [{ name: "value", label: "API key", secret: true }],
+};
+
 export async function ensureMcpIntegrationWithProbe(
   api: ExecutorJson,
   target: ResolvedConnectTarget,
 ): Promise<EnsureMcpResult> {
   const probe = await api("POST", "/api/mcp/probe", { endpoint: target.endpoint });
   if (!probe.ok) {
-    throw new Error(`MCP probe failed (${probe.status}).`);
+    throw new Error(`MCP probe failed (${probe.status})${failureDetail(probe.json)}`);
   }
   const probeBody = asRecord(probe.json) ?? {};
   const slug =
@@ -124,24 +146,32 @@ export async function ensureMcpIntegrationWithProbe(
     text(probeBody.slug) ||
     slugify(target.name);
 
+  const authenticationTemplate = authenticationTemplateFromProbe(probeBody);
   const created = await api("POST", "/api/mcp/servers", {
     transport: "remote",
     name: target.name,
     endpoint: target.endpoint,
     slug,
     remoteTransport: "auto",
-    auth: authShorthandFromProbe(probeBody),
+    authenticationTemplate,
   });
   if (created.ok) {
     return { slug: text(asRecord(created.json)?.slug) || slug, probe: probeBody };
   }
   if (created.status === 409) {
-    // Idempotent: reuse existing slug for this endpoint.
+    // Idempotent: reuse existing slug; merge optional API-key method for open servers.
     const listed = await api("GET", "/api/integrations");
     const match = asArray(listed.json)
       .map(asRecord)
       .find((row) => row && text(row.displayUrl) === target.endpoint);
-    return { slug: text(match?.slug) || slug, probe: probeBody };
+    const existingSlug = text(match?.slug) || slug;
+    if (probeBody.requiresOAuth !== true && probeBody.requiresAuthentication !== true) {
+      await api("POST", `/api/mcp/servers/${encodeURIComponent(existingSlug)}/auth`, {
+        authenticationTemplate,
+        mode: "merge",
+      });
+    }
+    return { slug: existingSlug, probe: probeBody };
   }
   throw new Error(`Create MCP server failed (${created.status})${failureDetail(created.json)}`);
 }
@@ -264,22 +294,23 @@ export async function startAuthForSlug(
     probe: Record<string, unknown>;
     executorOrigin: string;
     discoveryUrl: string;
+    displayName?: string;
   },
 ): Promise<BeginExecutorConnectResult> {
   const requiresAuth = opts.probe.requiresAuthentication === true;
   const requiresOAuth = opts.probe.requiresOAuth === true;
+  const displayName = opts.displayName || opts.slug;
+
+  // Executor: register first, connect account second. Open servers (Firecrawl
+  // keyless, etc.) must NOT auto-create a none connection and claim "connected".
   if (!requiresAuth && !requiresOAuth) {
-    const none = await api("POST", "/api/connections", {
-      owner: "user",
-      name: "default",
-      integration: opts.slug,
-      template: "none",
-      value: "",
-    });
-    if (!none.ok && none.status !== 409 && none.status !== 400) {
-      throw new Error(`Create connection failed (${none.status}).`);
-    }
-    return { status: "connected", slug: opts.slug };
+    return {
+      status: "needs_secret",
+      slug: opts.slug,
+      template: OPTIONAL_API_KEY_TEMPLATE,
+      optional: true,
+      displayName,
+    };
   }
 
   const detail = await api("GET", `/api/integrations/${encodeURIComponent(opts.slug)}`);
@@ -342,6 +373,7 @@ export async function startAuthForSlug(
       status: "needs_secret",
       slug: opts.slug,
       template: secretTemplateFromAuthMethod(secretMethod),
+      displayName,
     };
   }
 
@@ -360,7 +392,7 @@ export async function submitSecret(
     value: input.value,
   });
   if (!res.ok && res.status !== 409) {
-    throw new Error(`Save secret failed (${res.status}).`);
+    throw new Error(`Save secret failed (${res.status})${failureDetail(res.json)}`);
   }
   return { slug: input.slug };
 }
@@ -380,5 +412,6 @@ export async function connectMcpTarget(
     probe: ensured.probe,
     executorOrigin,
     discoveryUrl: target.endpoint,
+    displayName: target.name,
   });
 }

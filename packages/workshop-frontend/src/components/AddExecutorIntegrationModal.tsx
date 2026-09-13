@@ -64,29 +64,13 @@ async function pollUntilConnected(
   return false
 }
 
-async function handleConnectResult(
-  result: BeginExecutorConnectResult,
-  opts: {
-    listIntegrations: () => Promise<ExecutorIntegrationInfo[]>
-    onConnected: () => void
-    onNeedsSecret: (slug: string, templateId: string, label: string) => void
-    onNeedsOauth: (slug: string, authorizationUrl: string) => void
-    onError: (message: string) => void
-  },
-) {
-  switch (result.status) {
-    case 'connected':
-      opts.onConnected()
-      return
-    case 'needs_oauth':
-      opts.onNeedsOauth(result.slug, result.authorizationUrl)
-      return
-    case 'needs_secret':
-      opts.onNeedsSecret(result.slug, result.template.id, result.template.label)
-      return
-    default:
-      opts.onError('Connect failed.')
-  }
+function Spinner({ className = 'h-8 w-8' }: { className?: string }) {
+  return (
+    <div
+      className={`${className} animate-spin rounded-full border-2 border-kumo-brand border-t-transparent`}
+      aria-hidden
+    />
+  )
 }
 
 export function AddExecutorIntegrationModal({
@@ -101,12 +85,19 @@ export function AddExecutorIntegrationModal({
   const [kind, setKind] = useState<'' | ExecutorIntegrationKind>('')
   const [catalog, setCatalog] = useState<IntegrationCatalogRow[] | null>(null)
   const [busy, setBusy] = useState(false)
+  const [workingLabel, setWorkingLabel] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [secret, setSecret] = useState<{ slug: string; template: string; label: string } | null>(
+  const [secret, setSecret] = useState<{
+    slug: string
+    template: string
+    label: string
+    optional: boolean
+    displayName: string
+  } | null>(null)
+  const [secretValue, setSecretValue] = useState('')
+  const [oauth, setOauth] = useState<{ slug: string; authorizationUrl: string; displayName: string } | null>(
     null,
   )
-  const [secretValue, setSecretValue] = useState('')
-  const [oauth, setOauth] = useState<{ slug: string; authorizationUrl: string } | null>(null)
 
   const connectedByEndpoint = useMemo(() => {
     const map = new Map<string, ExecutorIntegrationInfo>()
@@ -145,6 +136,8 @@ export function AddExecutorIntegrationModal({
       setSecret(null)
       setSecretValue('')
       setOauth(null)
+      setWorkingLabel(null)
+      setBusy(false)
       setQ('')
       setKind('')
       setCatalog(null)
@@ -156,18 +149,34 @@ export function AddExecutorIntegrationModal({
     onOpenChange(false)
   }
 
-  const runHandlers = {
-    listIntegrations: () => authenticatedApi.listExecutorIntegrations(),
-    onConnected: finishConnected,
-    onNeedsSecret: (slug: string, templateId: string, label: string) => {
-      setOauth(null)
-      setSecret({ slug, template: templateId, label })
-    },
-    onNeedsOauth: (slug: string, authorizationUrl: string) => {
-      setSecret(null)
-      setOauth({ slug, authorizationUrl })
-    },
-    onError: (message: string) => setError(message),
+  const applyConnectResult = async (result: BeginExecutorConnectResult) => {
+    switch (result.status) {
+      case 'connected':
+        finishConnected()
+        return
+      case 'needs_oauth':
+        setSecret(null)
+        setWorkingLabel(null)
+        setOauth({
+          slug: result.slug,
+          authorizationUrl: result.authorizationUrl,
+          displayName: result.slug,
+        })
+        return
+      case 'needs_secret':
+        setOauth(null)
+        setWorkingLabel(null)
+        setSecret({
+          slug: result.slug,
+          template: result.template.id,
+          label: result.template.label,
+          optional: result.optional === true,
+          displayName: result.displayName || result.slug,
+        })
+        return
+      default:
+        setError('Connect failed.')
+    }
   }
 
   const continueOauth = async () => {
@@ -197,23 +206,31 @@ export function AddExecutorIntegrationModal({
     }
   }
 
-  const connectCatalogRow = async (row: IntegrationCatalogRow) => {
+  const beginConnect = async (label: string, run: () => Promise<BeginExecutorConnectResult>) => {
     setBusy(true)
     setError(null)
     setOauth(null)
+    setSecret(null)
+    setWorkingLabel(label)
     try {
-      const result = await authenticatedApi.beginExecutorConnect({
-        source: 'catalog',
-        catalogId: row.id,
-      })
-      await handleConnectResult(result, runHandlers)
+      const result = await run()
+      await applyConnectResult(result)
     } catch (err) {
       logRpcFailure('beginExecutorConnect failed:', err)
       setError(err instanceof Error ? err.message : 'Connect failed.')
+      setWorkingLabel(null)
     } finally {
       setBusy(false)
     }
   }
+
+  const connectCatalogRow = (row: IntegrationCatalogRow) =>
+    beginConnect(row.name, () =>
+      authenticatedApi.beginExecutorConnect({
+        source: 'catalog',
+        catalogId: row.id,
+      }),
+    )
 
   useEffect(() => {
     if (!open || !initialCatalogId || busy || secret || oauth) return
@@ -221,17 +238,19 @@ export function AddExecutorIntegrationModal({
     void (async () => {
       setBusy(true)
       setError(null)
+      setWorkingLabel('integration')
       try {
         const result = await authenticatedApi.beginExecutorConnect({
           source: 'catalog',
           catalogId: initialCatalogId,
         })
         if (cancelled) return
-        await handleConnectResult(result, runHandlers)
+        await applyConnectResult(result)
       } catch (err) {
         if (cancelled) return
         logRpcFailure('beginExecutorConnect failed:', err)
         setError(err instanceof Error ? err.message : 'Connect failed.')
+        setWorkingLabel(null)
       } finally {
         if (!cancelled) setBusy(false)
       }
@@ -246,22 +265,18 @@ export function AddExecutorIntegrationModal({
   const connectDetectOrSearch = async () => {
     const trimmed = q.trim()
     if (!trimmed) return
-    setBusy(true)
-    setError(null)
-    setOauth(null)
-    try {
-      if (looksLikeUrl(trimmed)) {
-        const result = await authenticatedApi.beginExecutorConnect({
+    if (looksLikeUrl(trimmed)) {
+      await beginConnect(trimmed, () =>
+        authenticatedApi.beginExecutorConnect({
           source: 'detect',
           url: trimmed,
-        })
-        await handleConnectResult(result, runHandlers)
-      } else {
-        await loadCatalog()
-      }
-    } catch (err) {
-      logRpcFailure('detect/connect failed:', err)
-      setError(err instanceof Error ? err.message : 'Connect failed.')
+        }),
+      )
+      return
+    }
+    setBusy(true)
+    try {
+      await loadCatalog()
     } finally {
       setBusy(false)
     }
@@ -286,7 +301,27 @@ export function AddExecutorIntegrationModal({
     }
   }
 
+  const continueWithoutKey = async () => {
+    if (!secret) return
+    setBusy(true)
+    setError(null)
+    try {
+      await authenticatedApi.submitExecutorSecret({
+        slug: secret.slug,
+        template: 'none',
+        value: '',
+      })
+      finishConnected()
+    } catch (err) {
+      logRpcFailure('submitExecutorSecret(none) failed:', err)
+      setError(err instanceof Error ? err.message : 'Connect failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const entries = catalog ?? []
+  const showWorking = busy && !!workingLabel && !secret && !oauth
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -294,157 +329,220 @@ export function AddExecutorIntegrationModal({
         className="responsive-dialog connect-connector-dialog !z-[1000] !top-[clamp(28px,8vh,80px)] !flex !max-h-[calc(100vh-clamp(28px,8vh,80px)-28px)] !w-[min(560px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
         size="lg"
       >
-          <div className="flex shrink-0 items-start justify-between gap-3 border-b border-kumo-line px-5 py-4">
-            <div>
-              <Dialog.Title className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">
-                Connect an integration
-              </Dialog.Title>
-              <Dialog.Description className="mt-1 text-[13px] text-kumo-subtle">
-                Search the catalog, or paste an MCP URL to detect.
-              </Dialog.Description>
-            </div>
-            <Dialog.Close
-              render={(props) => (
-                <WorkshopIconButton {...props} aria-label="Close" className="shrink-0">
-                  <X size={16} />
-                </WorkshopIconButton>
-              )}
-            />
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-kumo-line px-5 py-4">
+          <div>
+            <Dialog.Title className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">
+              Connect an integration
+            </Dialog.Title>
+            <Dialog.Description className="mt-1 text-[13px] text-kumo-subtle">
+              Search the catalog, or paste an MCP URL to detect.
+            </Dialog.Description>
           </div>
-
-          <div className="new-gatekeeper-scroll-balanced flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
-            {oauth ? (
-              <div className="flex flex-col gap-3">
-                <p className="text-[13px] text-kumo-subtle">
-                  Sign in to finish connecting{' '}
-                  <span className="text-kumo-default">{oauth.slug}</span>.
-                </p>
-                {error && <p className="text-[12px] text-red-600">{error}</p>}
-                <WorkshopButton disabled={busy} onClick={() => void continueOauth()}>
-                  {busy ? 'Waiting for sign-in…' : 'Continue with OAuth'}
-                </WorkshopButton>
-                <button
-                  type="button"
-                  className="text-left text-[12px] text-kumo-subtle underline"
-                  onClick={() => {
-                    setOauth(null)
-                    setError(null)
-                  }}
-                >
-                  Back to catalog
-                </button>
-              </div>
-            ) : secret ? (
-              <div className="flex flex-col gap-3">
-                <p className="text-[13px] text-kumo-subtle">
-                  Enter the secret for <span className="text-kumo-default">{secret.slug}</span> (
-                  {secret.label}).
-                </p>
-                <input
-                  type="password"
-                  value={secretValue}
-                  onChange={(e) => setSecretValue(e.target.value)}
-                  className="rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-[13px] text-kumo-default outline-none focus:border-kumo-brand"
-                  placeholder={secret.label}
-                  autoFocus
-                />
-                <WorkshopButton disabled={busy || !secretValue.trim()} onClick={() => void submitSecret()}>
-                  {busy ? 'Saving…' : 'Save and connect'}
-                </WorkshopButton>
-              </div>
-            ) : (
-              <>
-                <div className="flex gap-2">
-                  <div className="relative min-w-0 flex-1">
-                    <MagnifyingGlass
-                      size={14}
-                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
-                    />
-                    <input
-                      value={q}
-                      onChange={(e) => setQ(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void connectDetectOrSearch()
-                      }}
-                      placeholder="Search or paste a URL…"
-                      className="w-full rounded-lg border border-kumo-line bg-kumo-base py-2 pl-8 pr-3 text-[13px] text-kumo-default outline-none focus:border-kumo-brand"
-                    />
-                  </div>
-                  {looksLikeUrl(q) && (
-                    <WorkshopButton disabled={busy} onClick={() => void connectDetectOrSearch()}>
-                      {busy ? '…' : 'Detect'}
-                    </WorkshopButton>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap gap-1.5">
-                  {KINDS.map((k) => (
-                    <button
-                      key={k.label}
-                      type="button"
-                      onClick={() => setKind(k.id)}
-                      className={`rounded-md px-2.5 py-1 text-[12px] ${
-                        kind === k.id
-                          ? 'bg-kumo-brand text-white'
-                          : 'border border-kumo-line text-kumo-subtle hover:bg-kumo-inset'
-                      }`}
-                    >
-                      {k.label}
-                    </button>
-                  ))}
-                </div>
-
-                {error && <p className="text-[12px] text-red-600">{error}</p>}
-
-                <ul className="flex flex-col gap-1.5">
-                  {entries.map((row) => {
-                    const already =
-                      (!!row.endpoint && connectedByEndpoint.has(row.endpoint)) ||
-                      connected.some((c) => c.name === row.name && c.kind === row.kind && c.connected)
-                    return (
-                      <li key={row.id}>
-                        <button
-                          type="button"
-                          disabled={busy || already || row.kind !== 'mcp'}
-                          onClick={() => void connectCatalogRow(row)}
-                          className="flex w-full items-center gap-3 rounded-xl border border-kumo-line px-3 py-2.5 text-left transition-colors hover:bg-kumo-inset disabled:opacity-50"
-                        >
-                          {row.iconUrl ? (
-                            <img src={row.iconUrl} alt="" className="size-8 rounded-lg" />
-                          ) : (
-                            <div className="flex size-8 items-center justify-center rounded-lg bg-kumo-inset text-[12px] font-medium text-kumo-subtle">
-                              {(row.name[0] || '?').toUpperCase()}
-                            </div>
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-[13px] font-medium text-kumo-default">
-                              {row.name}
-                            </div>
-                            <div className="truncate text-[12px] text-kumo-subtle">
-                              {row.kind.toUpperCase()}
-                              {row.description ? ` · ${row.description}` : ''}
-                            </div>
-                          </div>
-                          {already ? (
-                            <span className="text-[11px] text-kumo-inactive">Connected</span>
-                          ) : row.kind !== 'mcp' ? (
-                            <span className="text-[11px] text-kumo-inactive">Soon</span>
-                          ) : (
-                            <Plus size={14} className="text-kumo-subtle" />
-                          )}
-                        </button>
-                      </li>
-                    )
-                  })}
-                  {entries.length === 0 && (
-                    <li className="py-8 text-center text-[13px] text-kumo-subtle">
-                      {catalog === null ? 'Loading catalog…' : 'No matches'}
-                    </li>
-                  )}
-                </ul>
-              </>
+          <Dialog.Close
+            render={(props) => (
+              <WorkshopIconButton {...props} aria-label="Close" className="shrink-0" disabled={busy}>
+                <X size={16} />
+              </WorkshopIconButton>
             )}
-          </div>
+          />
+        </div>
+
+        <div className="new-gatekeeper-scroll-balanced flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
+          {showWorking ? (
+            <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+              <Spinner />
+              <p className="text-[14px] font-medium text-kumo-default">
+                Connecting {workingLabel}…
+              </p>
+              <p className="max-w-xs text-[12px] text-kumo-subtle">
+                Probing the MCP server and registering it in Executor.
+              </p>
+            </div>
+          ) : oauth ? (
+            <div className="flex flex-col gap-3">
+              <p className="text-[13px] text-kumo-subtle">
+                Sign in to finish connecting{' '}
+                <span className="text-kumo-default">{oauth.displayName}</span>.
+              </p>
+              {error && <p className="text-[12px] text-red-600">{error}</p>}
+              <WorkshopButton disabled={busy} onClick={() => void continueOauth()}>
+                {busy ? (
+                  <span className="inline-flex items-center gap-2">
+                    <Spinner className="h-3.5 w-3.5" />
+                    Waiting for sign-in…
+                  </span>
+                ) : (
+                  'Continue with OAuth'
+                )}
+              </WorkshopButton>
+              <button
+                type="button"
+                className="text-left text-[12px] text-kumo-subtle underline"
+                disabled={busy}
+                onClick={() => {
+                  setOauth(null)
+                  setError(null)
+                }}
+              >
+                Back to catalog
+              </button>
+            </div>
+          ) : secret ? (
+            <div className="flex flex-col gap-3">
+              {secret.optional ? (
+                <>
+                  <p className="text-[14px] font-medium text-kumo-default">
+                    {secret.displayName} is ready
+                  </p>
+                  <p className="text-[13px] text-kumo-subtle">
+                    This server works without a key. Add an API key for higher limits and more
+                    tools, or continue without one.
+                  </p>
+                </>
+              ) : (
+                <p className="text-[13px] text-kumo-subtle">
+                  Enter the {secret.label.toLowerCase()} for{' '}
+                  <span className="text-kumo-default">{secret.displayName}</span>.
+                </p>
+              )}
+              <input
+                type="password"
+                value={secretValue}
+                onChange={(e) => setSecretValue(e.target.value)}
+                className="rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-[13px] text-kumo-default outline-none focus:border-kumo-brand"
+                placeholder={secret.label}
+                autoFocus
+                disabled={busy}
+              />
+              {error && <p className="text-[12px] text-red-600">{error}</p>}
+              <div className="flex flex-wrap gap-2">
+                <WorkshopButton
+                  disabled={busy || !secretValue.trim()}
+                  onClick={() => void submitSecret()}
+                >
+                  {busy && secretValue.trim() ? 'Saving…' : 'Save and connect'}
+                </WorkshopButton>
+                {secret.optional && (
+                  <WorkshopButton disabled={busy} onClick={() => void continueWithoutKey()}>
+                    {busy && !secretValue.trim() ? 'Connecting…' : 'Continue without key'}
+                  </WorkshopButton>
+                )}
+              </div>
+              <button
+                type="button"
+                className="text-left text-[12px] text-kumo-subtle underline"
+                disabled={busy}
+                onClick={() => {
+                  setSecret(null)
+                  setSecretValue('')
+                  setError(null)
+                }}
+              >
+                Back to catalog
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="flex gap-2">
+                <div className="relative min-w-0 flex-1">
+                  <MagnifyingGlass
+                    size={14}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
+                  />
+                  <input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void connectDetectOrSearch()
+                    }}
+                    placeholder="Search or paste a URL…"
+                    className="w-full rounded-lg border border-kumo-line bg-kumo-base py-2 pl-8 pr-3 text-[13px] text-kumo-default outline-none focus:border-kumo-brand"
+                  />
+                </div>
+                {looksLikeUrl(q) && (
+                  <WorkshopButton disabled={busy} onClick={() => void connectDetectOrSearch()}>
+                    Detect
+                  </WorkshopButton>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {KINDS.map((k) => (
+                  <button
+                    key={k.label}
+                    type="button"
+                    onClick={() => setKind(k.id)}
+                    className={`rounded-md px-2.5 py-1 text-[12px] ${
+                      kind === k.id
+                        ? 'bg-kumo-brand text-white'
+                        : 'border border-kumo-line text-kumo-subtle hover:bg-kumo-inset'
+                    }`}
+                  >
+                    {k.label}
+                  </button>
+                ))}
+              </div>
+
+              {error && <p className="text-[12px] text-red-600">{error}</p>}
+
+              <ul className="flex flex-col gap-1.5">
+                {entries.map((row) => {
+                  const already =
+                    (!!row.endpoint && connectedByEndpoint.has(row.endpoint)) ||
+                    connected.some(
+                      (c) => c.name === row.name && c.kind === row.kind && c.connected,
+                    )
+                  return (
+                    <li key={row.id}>
+                      <button
+                        type="button"
+                        disabled={busy || already || row.kind !== 'mcp'}
+                        onClick={() => void connectCatalogRow(row)}
+                        className="flex w-full items-center gap-3 rounded-xl border border-kumo-line px-3 py-2.5 text-left transition-colors hover:bg-kumo-inset disabled:opacity-50"
+                      >
+                        {row.iconUrl ? (
+                          <img src={row.iconUrl} alt="" className="size-8 rounded-lg" />
+                        ) : (
+                          <div className="flex size-8 items-center justify-center rounded-lg bg-kumo-inset text-[12px] font-medium text-kumo-subtle">
+                            {(row.name[0] || '?').toUpperCase()}
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium text-kumo-default">
+                            {row.name}
+                          </div>
+                          <div className="truncate text-[12px] text-kumo-subtle">
+                            {row.kind.toUpperCase()}
+                            {row.description ? ` · ${row.description}` : ''}
+                          </div>
+                        </div>
+                        {already ? (
+                          <span className="text-[11px] text-kumo-inactive">Connected</span>
+                        ) : row.kind !== 'mcp' ? (
+                          <span className="text-[11px] text-kumo-inactive">Soon</span>
+                        ) : (
+                          <Plus size={14} className="text-kumo-subtle" />
+                        )}
+                      </button>
+                    </li>
+                  )
+                })}
+                {entries.length === 0 && (
+                  <li className="py-8 text-center text-[13px] text-kumo-subtle">
+                    {catalog === null ? (
+                      <span className="inline-flex items-center gap-2">
+                        <Spinner className="h-3.5 w-3.5" />
+                        Loading catalog…
+                      </span>
+                    ) : (
+                      'No matches'
+                    )}
+                  </li>
+                )}
+              </ul>
+            </>
+          )}
+        </div>
       </Dialog>
     </Dialog.Root>
   )
