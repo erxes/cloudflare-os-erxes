@@ -94,6 +94,8 @@ async function handleConnectResult(
     case 'needs_secret':
       opts.onNeedsSecret(result.slug, result.template.id, result.template.label)
       return
+    default:
+      opts.onError('Connect failed.')
   }
 }
 
@@ -271,10 +273,11 @@ export function AddExecutorIntegrationModal({
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
-        <Dialog.Content className="connect-connector-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base shadow-xl">
-          <div className="flex items-start justify-between gap-3 border-b border-kumo-line px-5 py-4">
+      <Dialog
+        className="responsive-dialog connect-connector-dialog !z-[1000] !top-[clamp(28px,8vh,80px)] !flex !max-h-[calc(100vh-clamp(28px,8vh,80px)-28px)] !w-[min(560px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
+        size="lg"
+      >
+          <div className="flex shrink-0 items-start justify-between gap-3 border-b border-kumo-line px-5 py-4">
             <div>
               <Dialog.Title className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">
                 Connect an integration
@@ -283,13 +286,13 @@ export function AddExecutorIntegrationModal({
                 Search the catalog, or paste an MCP URL to detect.
               </Dialog.Description>
             </div>
-            <WorkshopIconButton
-              aria-label="Close"
-              onClick={() => onOpenChange(false)}
-              className="shrink-0"
-            >
-              <X size={16} />
-            </WorkshopIconButton>
+            <Dialog.Close
+              render={(props) => (
+                <WorkshopIconButton {...props} aria-label="Close" className="shrink-0">
+                  <X size={16} />
+                </WorkshopIconButton>
+              )}
+            />
           </div>
 
           <div className="new-gatekeeper-scroll-balanced flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
@@ -358,7 +361,7 @@ export function AddExecutorIntegrationModal({
                 <ul className="flex flex-col gap-1.5">
                   {entries.map((row) => {
                     const already =
-                      connectedByEndpoint.has(row.endpoint) ||
+                      (!!row.endpoint && connectedByEndpoint.has(row.endpoint)) ||
                       connected.some((c) => c.name === row.name && c.kind === row.kind && c.connected)
                     return (
                       <li key={row.id}>
@@ -404,8 +407,7 @@ export function AddExecutorIntegrationModal({
               </>
             )}
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
+      </Dialog>
     </Dialog.Root>
   )
 }
