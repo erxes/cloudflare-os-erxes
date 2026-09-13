@@ -43,11 +43,27 @@ describe("normalizeIntegrationsShCatalog", () => {
           featured: true,
         },
         { id: "cli/foo", kind: "cli", name: "foo", description: "" },
+        {
+          id: "stdio/local",
+          kind: "mcp",
+          name: "Local",
+          description: "",
+          connectUrl: "stdio://x",
+          transport: "stdio",
+        },
       ],
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]?.endpoint).toBe("https://mcp.deepwiki.com/mcp");
     expect(rows[0]?.iconUrl).toBe("https://integrations.sh/logo/deepwiki.com");
+  });
+
+  test("drops rows without endpoint", () => {
+    expect(
+      normalizeIntegrationsShCatalog({
+        data: [{ id: "a", kind: "mcp", name: "A", description: "" }],
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -98,7 +114,6 @@ describe("resolveFromCatalog", () => {
             description: "",
             kind: "mcp",
             endpoint: "https://mcp.slack.com/mcp",
-            domain: "slack.com",
           },
         ],
       ),

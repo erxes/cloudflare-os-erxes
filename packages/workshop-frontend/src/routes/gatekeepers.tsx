@@ -472,6 +472,8 @@ function ConnectorsPage() {
   const [integrationSearch, setIntegrationSearch] = useState('')
   const [integrationKind, setIntegrationKind] = useState<'' | 'mcp' | 'openapi' | 'graphql'>('')
   const [connectIntegrationOpen, setConnectIntegrationOpen] = useState(false)
+  const [connectCatalogId, setConnectCatalogId] = useState<string | undefined>(undefined)
+  const hasErxesAccount = accounts.some((a) => a.vendorId === 'erxes')
 
   const [modalTarget, setModalTarget] = useState<ModalTarget>(null)
   const [connecting, setConnecting] = useState(false)
@@ -589,8 +591,8 @@ function ConnectorsPage() {
           kind: integrationKind || undefined,
           limit: 24,
         })
-        .then((surface) => {
-          if (!cancelled) setCatalogPreview(surface.entries)
+        .then((rows) => {
+          if (!cancelled) setCatalogPreview(rows)
         })
         .catch((err) => logRpcFailure('Failed to load integration catalog:', err))
     }, 200)
@@ -770,10 +772,11 @@ function ConnectorsPage() {
         <header className="mb-8 grid gap-8 lg:grid-cols-[minmax(0,540px)_444px] lg:items-center lg:justify-between">
           <div>
             <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-kumo-default sm:text-[34px]">
-              Integrations
+              Gatekeepers
             </h1>
             <p className="mt-2 text-[14px] leading-[20px] font-normal tracking-[-0.25px] text-kumo-subtle">
-              Connect tools for your agent from the catalog. CF OS connectors stay below.
+              Add the apps and accounts your workspaces can use. Connect once, then wire
+              them into anything you build.
             </p>
           </div>
           <ConnectorsHeroDiagram accounts={accounts} vendors={vendors} siteName={siteName} />
@@ -787,7 +790,10 @@ function ConnectorsPage() {
             />
             <button
               type="button"
-              onClick={() => setConnectIntegrationOpen(true)}
+              onClick={() => {
+                setConnectCatalogId(undefined)
+                setConnectIntegrationOpen(true)
+              }}
               className="inline-flex items-center gap-1.5 rounded-lg border border-kumo-line bg-kumo-base px-3 py-1.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default hover:bg-kumo-inset"
             >
               <Plus size={14} />
@@ -867,7 +873,10 @@ function ConnectorsPage() {
                 <button
                   key={row.id}
                   type="button"
-                  onClick={() => setConnectIntegrationOpen(true)}
+                  onClick={() => {
+                    setConnectCatalogId(row.id)
+                    setConnectIntegrationOpen(true)
+                  }}
                   className="flex items-center gap-3 rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3 text-left themed-card-hover-shadow"
                 >
                   {row.iconUrl ? (
@@ -892,7 +901,9 @@ function ConnectorsPage() {
           </div>
           {catalogPreview.length === 0 && (
             <p className="mt-2 text-[13px] text-kumo-subtle">
-              Sign in with erxes to browse the catalog, or open Connect to paste an MCP URL.
+              {hasErxesAccount
+                ? 'No catalog matches. Open Connect to paste an MCP URL.'
+                : 'Sign in with erxes to browse and connect Executor integrations.'}
             </p>
           )}
         </section>
@@ -1019,9 +1030,13 @@ function ConnectorsPage() {
 
       <AddExecutorIntegrationModal
         open={connectIntegrationOpen}
-        onOpenChange={setConnectIntegrationOpen}
+        onOpenChange={(open) => {
+          setConnectIntegrationOpen(open)
+          if (!open) setConnectCatalogId(undefined)
+        }}
         connected={executorIntegrations}
         onConnected={refreshExecutorIntegrations}
+        initialCatalogId={connectCatalogId}
       />
 
       {activeVendor && (

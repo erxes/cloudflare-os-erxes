@@ -1,12 +1,10 @@
 import type {
   BeginExecutorConnectInput,
   BeginExecutorConnectResult,
-  ExecutorDetectCandidate,
   ExecutorIntegrationKind,
   ExecutorSecretTemplate,
   IntegrationCatalogRow,
   SubmitExecutorSecretInput,
-  SubmitExecutorSecretResult,
 } from "@gadgets/workshop-shared/api";
 
 export type ExecutorJson = (
@@ -32,8 +30,17 @@ function text(value: unknown): string {
 
 const CONFIDENCE_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
 
-export function rankDetectCandidates(json: unknown): ExecutorDetectCandidate[] {
-  const out: ExecutorDetectCandidate[] = [];
+export type DetectCandidate = {
+  kind: ExecutorIntegrationKind;
+  confidence: "high" | "medium" | "low";
+  endpoint: string;
+  name: string;
+  slug: string;
+};
+
+/** Rank detect results; highest confidence first. */
+export function rankDetectCandidates(json: unknown): DetectCandidate[] {
+  const out: DetectCandidate[] = [];
   for (const row of asArray(json)) {
     const rec = asRecord(row);
     if (!rec) continue;
@@ -65,21 +72,37 @@ export type ResolvedConnectTarget = {
 export function resolveFromCatalog(
   input: Extract<BeginExecutorConnectInput, { source: "catalog" }>,
   catalog: readonly IntegrationCatalogRow[],
-): ResolvedConnectTarget | { error: string } {
+): ResolvedConnectTarget {
   const row = catalog.find((e) => e.id === input.catalogId);
-  if (!row) return { error: `Unknown catalog entry: ${input.catalogId}` };
-  if (!row.endpoint) return { error: `${row.name} has no connect URL in the catalog.` };
+  if (!row) throw new Error(`Unknown catalog entry: ${input.catalogId}`);
   return {
     kind: row.kind,
     endpoint: row.endpoint,
     name: row.name,
-    slugHint: row.domain?.replace(/\./g, "-") || row.id.split("/").pop(),
+    slugHint: row.id.split("/").pop()?.replace(/\./g, "-"),
   };
 }
 
-export type EnsureMcpResult =
-  | { slug: string; probe: Record<string, unknown> }
-  | { error: string };
+export type EnsureMcpResult = { slug: string; probe: Record<string, unknown> };
+
+function authTemplateFromProbe(probe: Record<string, unknown>): unknown[] {
+  if (probe.requiresOAuth === true) {
+    return [{ kind: "oauth", authorizationUrl: "", tokenUrl: "", scopes: [] }];
+  }
+  if (probe.requiresAuthentication === true) {
+    return [
+      {
+        kind: "apikey",
+        placements: [{ carrier: "header", name: "Authorization", prefix: "Bearer " }],
+      },
+    ];
+  }
+  return [{ kind: "none" }];
+}
+
+function slugify(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "mcp";
+}
 
 export async function ensureMcpIntegrationWithProbe(
   api: ExecutorJson,
@@ -87,14 +110,13 @@ export async function ensureMcpIntegrationWithProbe(
 ): Promise<EnsureMcpResult> {
   const probe = await api("POST", "/api/mcp/probe", { endpoint: target.endpoint });
   if (!probe.ok) {
-    return { error: `MCP probe failed (${probe.status}).` };
+    throw new Error(`MCP probe failed (${probe.status}).`);
   }
   const probeBody = asRecord(probe.json) ?? {};
   const slug =
     text(target.slugHint) ||
     text(probeBody.slug) ||
-    target.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
-    "mcp";
+    slugify(target.name);
 
   const created = await api("POST", "/api/mcp/servers", {
     transport: "remote",
@@ -102,16 +124,24 @@ export async function ensureMcpIntegrationWithProbe(
     endpoint: target.endpoint,
     slug,
     remoteTransport: "auto",
+    authenticationTemplate: authTemplateFromProbe(probeBody),
   });
-  if (!created.ok && created.status !== 409) {
-    return { error: `Create MCP server failed (${created.status}).` };
+  if (created.ok) {
+    return { slug: text(asRecord(created.json)?.slug) || slug, probe: probeBody };
   }
-  const createdSlug = text(asRecord(created.json)?.slug) || slug;
-  return { slug: createdSlug, probe: probeBody };
+  if (created.status === 409) {
+    // Idempotent: reuse existing slug for this endpoint.
+    const listed = await api("GET", "/api/integrations");
+    const match = asArray(listed.json)
+      .map(asRecord)
+      .find((row) => row && text(row.displayUrl) === target.endpoint);
+    return { slug: text(match?.slug) || slug, probe: probeBody };
+  }
+  throw new Error(`Create MCP server failed (${created.status}).`);
 }
 
 function secretTemplateFromAuthMethod(method: Record<string, unknown>): ExecutorSecretTemplate {
-  const id = text(method.id) || text(method.slug) || "apikey";
+  const id = text(method.id) || text(method.template) || text(method.slug) || "apikey";
   const kindRaw = text(method.kind).toLowerCase();
   const kind = kindRaw === "header" ? "header" : kindRaw === "none" ? "none" : "apikey";
   return {
@@ -132,7 +162,7 @@ export async function startAuthForSlug(
 ): Promise<BeginExecutorConnectResult> {
   const requiresAuth = opts.probe.requiresAuthentication === true;
   const requiresOAuth = opts.probe.requiresOAuth === true;
-  if (!requiresAuth) {
+  if (!requiresAuth && !requiresOAuth) {
     const none = await api("POST", "/api/connections", {
       owner: "user",
       name: "default",
@@ -140,10 +170,8 @@ export async function startAuthForSlug(
       template: "none",
       value: "",
     });
-    if (!none.ok && none.status !== 409) {
-      // Some none-auth servers need no connection row; treat as connected.
-      if (none.status === 400) return { status: "connected", slug: opts.slug };
-      return { status: "error", message: `Create connection failed (${none.status}).` };
+    if (!none.ok && none.status !== 409 && none.status !== 400) {
+      throw new Error(`Create connection failed (${none.status}).`);
     }
     return { status: "connected", slug: opts.slug };
   }
@@ -166,13 +194,12 @@ export async function startAuthForSlug(
     const clients = asArray(clientsRes.json);
     const first = asRecord(clients[0]);
     if (!first) {
-      return {
-        status: "error",
-        message:
-          "This MCP needs OAuth. Register an OAuth app in Executor once, then Connect again.",
-      };
+      throw new Error(
+        "This MCP needs OAuth. Register an OAuth app in Executor once, then Connect again.",
+      );
     }
-    const template = text(oauthMethod?.id) || text(oauthMethod?.slug) || "oauth";
+    const template =
+      text(oauthMethod?.template) || text(oauthMethod?.id) || text(oauthMethod?.slug) || "oauth";
     const start = await api("POST", "/api/oauth/start", {
       client: text(first.slug) || text(first.client),
       clientOwner: text(first.owner) || "org",
@@ -184,7 +211,7 @@ export async function startAuthForSlug(
       redirectUri: `${opts.executorOrigin.replace(/\/$/, "")}/api/oauth/callback`,
     });
     if (!start.ok) {
-      return { status: "error", message: `OAuth start failed (${start.status}).` };
+      throw new Error(`OAuth start failed (${start.status}).`);
     }
     const body = asRecord(start.json) ?? {};
     if (text(body.status) === "connected") {
@@ -198,7 +225,7 @@ export async function startAuthForSlug(
         state: text(body.state),
       };
     }
-    return { status: "error", message: "OAuth start returned an unexpected response." };
+    throw new Error("OAuth start returned an unexpected response.");
   }
 
   if (secretMethod) {
@@ -209,16 +236,13 @@ export async function startAuthForSlug(
     };
   }
 
-  return {
-    status: "error",
-    message: "Integration requires auth but no supported method was found.",
-  };
+  throw new Error("Integration requires auth but no supported method was found.");
 }
 
 export async function submitSecret(
   api: ExecutorJson,
   input: SubmitExecutorSecretInput,
-): Promise<SubmitExecutorSecretResult> {
+): Promise<{ slug: string }> {
   const res = await api("POST", "/api/connections", {
     owner: "user",
     name: "default",
@@ -227,22 +251,21 @@ export async function submitSecret(
     value: input.value,
   });
   if (!res.ok && res.status !== 409) {
-    return { status: "error", message: `Save secret failed (${res.status}).` };
+    throw new Error(`Save secret failed (${res.status}).`);
   }
-  return { status: "connected", slug: input.slug };
+  return { slug: input.slug };
 }
 
-/** Run MCP connect after target is resolved. */
+/** Run MCP connect after target is resolved. OpenAPI/GraphQL throw. */
 export async function connectMcpTarget(
   api: ExecutorJson,
   target: ResolvedConnectTarget,
   executorOrigin: string,
 ): Promise<BeginExecutorConnectResult> {
   if (target.kind !== "mcp") {
-    return { status: "unsupported_kind", kind: target.kind };
+    throw new Error(`${target.kind.toUpperCase()} connect is not supported yet. Try an MCP server.`);
   }
   const ensured = await ensureMcpIntegrationWithProbe(api, target);
-  if ("error" in ensured) return { status: "error", message: ensured.error };
   return startAuthForSlug(api, {
     slug: ensured.slug,
     probe: ensured.probe,

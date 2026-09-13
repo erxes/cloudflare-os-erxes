@@ -1,9 +1,14 @@
 import type {
   ExecutorIntegrationInfo,
   ExecutorIntegrationKind,
-  IntegrationCatalogQuery,
   IntegrationCatalogRow,
 } from "@gadgets/workshop-shared/api";
+
+export type IntegrationCatalogQuery = {
+  q?: string;
+  kind?: ExecutorIntegrationKind;
+  limit?: number;
+};
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -59,7 +64,7 @@ export function mergeExecutorCatalog(
   return out;
 }
 
-/** Normalize integrations.sh api.json envelope into catalog rows (no cli). */
+/** Normalize integrations.sh api.json into catalog rows. Drops cli / unknown / no-endpoint. */
 export function normalizeIntegrationsShCatalog(envelope: unknown): IntegrationCatalogRow[] {
   const root = asRecord(envelope);
   const data = asArray(root?.data ?? envelope);
@@ -71,18 +76,21 @@ export function normalizeIntegrationsShCatalog(envelope: unknown): IntegrationCa
     if (!kind) continue;
     const id = text(rec.id) || text(rec.slug);
     if (!id) continue;
+    const endpoint = text(rec.connectUrl) || text(rec.endpoint) || text(rec.url);
+    if (!endpoint) continue;
+    // Stdio MCP is disabled on Cloudflare host.
+    if (text(rec.transport).toLowerCase() === "stdio") continue;
     const domain = text(rec.domain);
-    const connectUrl = text(rec.connectUrl);
-    const icon = text(rec.icon);
-    const iconUrl = icon || (domain ? `https://integrations.sh/logo/${domain}` : undefined);
+    const iconUrl = domain
+      ? `https://integrations.sh/logo/${domain}`
+      : text(rec.icon) || undefined;
     out.push({
       id,
       name: text(rec.name) || id,
       description: text(rec.description),
       kind,
-      ...(connectUrl ? { endpoint: connectUrl } : {}),
+      endpoint,
       ...(iconUrl ? { iconUrl } : {}),
-      ...(domain ? { domain } : {}),
       ...(rec.featured === true ? { featured: true } : {}),
     });
   }
@@ -103,8 +111,7 @@ export function filterCatalog(
       e.name.toLowerCase().includes(q) ||
       e.description.toLowerCase().includes(q) ||
       e.id.toLowerCase().includes(q) ||
-      (e.domain?.toLowerCase().includes(q) ?? false) ||
-      (e.endpoint?.toLowerCase().includes(q) ?? false)
+      e.endpoint.toLowerCase().includes(q)
     );
   });
   filtered.sort((a, b) => {

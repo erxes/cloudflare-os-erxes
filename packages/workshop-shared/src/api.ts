@@ -862,28 +862,15 @@ export type ExecutorIntegrationInfo = {
   connected: boolean;
 };
 
-/** One integrations.sh surface projected for browse. */
+/** One integrations.sh row projected for browse. Not an Executor slug yet. */
 export type IntegrationCatalogRow = {
   id: string;
   name: string;
   description: string;
   kind: ExecutorIntegrationKind;
-  endpoint?: string;
+  endpoint: string;
   iconUrl?: string;
-  domain?: string;
   featured?: boolean;
-};
-
-export type IntegrationCatalogSurface = {
-  fetchedAt: number;
-  stale: boolean;
-  entries: IntegrationCatalogRow[];
-};
-
-export type IntegrationCatalogQuery = {
-  q?: string;
-  kind?: ExecutorIntegrationKind;
-  limit?: number;
 };
 
 export type BeginExecutorConnectInput =
@@ -915,30 +902,14 @@ export type BeginExecutorConnectResult =
       status: "needs_secret";
       slug: string;
       template: ExecutorSecretTemplate;
-    }
-  | { status: "needs_erxes" }
-  | { status: "needs_choice"; candidates: ExecutorDetectCandidate[] }
-  | { status: "unsupported_kind"; kind: ExecutorIntegrationKind }
-  | { status: "error"; message: string };
-
-export type ExecutorDetectCandidate = {
-  kind: ExecutorIntegrationKind;
-  confidence: "high" | "medium" | "low";
-  endpoint: string;
-  name: string;
-  slug: string;
-};
+    };
 
 export type SubmitExecutorSecretInput = {
   slug: string;
   template: string;
+  // ponytail: single-string value covers apikey/header v1; multi-field forms upgrade to values: Record<string,string>
   value: string;
 };
-
-export type SubmitExecutorSecretResult =
-  | { status: "connected"; slug: string }
-  | { status: "needs_erxes" }
-  | { status: "error"; message: string };
 
 /** Maximum length (characters) of the admin-authored agent system-prompt instructions. */
 export const MAX_INSTANCE_INSTRUCTIONS_LENGTH = 8000;

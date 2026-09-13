@@ -3,11 +3,9 @@ import { X, MagnifyingGlass, Plus } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type {
   BeginExecutorConnectResult,
-  ExecutorDetectCandidate,
   ExecutorIntegrationInfo,
   ExecutorIntegrationKind,
   IntegrationCatalogRow,
-  IntegrationCatalogSurface,
 } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton } from './WorkshopControls'
 import { useAuthenticatedApi } from '../AuthContext'
@@ -18,6 +16,7 @@ type Props = {
   onOpenChange: (open: boolean) => void
   onConnected: () => void
   connected: ExecutorIntegrationInfo[]
+  initialCatalogId?: string
 }
 
 const KINDS: { id: '' | ExecutorIntegrationKind; label: string }[] = [
@@ -26,6 +25,9 @@ const KINDS: { id: '' | ExecutorIntegrationKind; label: string }[] = [
   { id: 'openapi', label: 'API' },
   { id: 'graphql', label: 'GraphQL' },
 ]
+
+const OAUTH_POLL_MS = 2_000
+const OAUTH_TIMEOUT_MS = 120_000
 
 function looksLikeUrl(raw: string): boolean {
   const v = raw.trim()
@@ -36,15 +38,39 @@ function looksLikeUrl(raw: string): boolean {
   return false
 }
 
+async function pollUntilConnected(
+  list: () => Promise<ExecutorIntegrationInfo[]>,
+  slug: string,
+  popup: Window | null,
+): Promise<boolean> {
+  const started = Date.now()
+  while (Date.now() - started < OAUTH_TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, OAUTH_POLL_MS))
+    try {
+      const rows = await list()
+      if (rows.some((row) => row.slug === slug && row.connected)) return true
+    } catch {
+      // keep polling
+    }
+    if (popup && popup.closed) {
+      try {
+        const rows = await list()
+        return rows.some((row) => row.slug === slug && row.connected)
+      } catch {
+        return false
+      }
+    }
+  }
+  return false
+}
+
 async function handleConnectResult(
   result: BeginExecutorConnectResult,
   opts: {
+    listIntegrations: () => Promise<ExecutorIntegrationInfo[]>
     onConnected: () => void
-    onOauthStarted: (slug: string) => void
     onNeedsSecret: (slug: string, templateId: string, label: string) => void
-    onNeedsChoice: (candidates: ExecutorDetectCandidate[]) => void
     onError: (message: string) => void
-    onNeedsErxes: () => void
   },
 ) {
   switch (result.status) {
@@ -52,28 +78,21 @@ async function handleConnectResult(
       opts.onConnected()
       return
     case 'needs_oauth': {
-      window.open(
+      const popup = window.open(
         result.authorizationUrl,
         'executor-oauth',
         'popup=1,width=640,height=760',
       )
-      opts.onOauthStarted(result.slug)
+      const ok = await pollUntilConnected(opts.listIntegrations, result.slug, popup)
+      if (ok) {
+        opts.onConnected()
+      } else {
+        opts.onError('OAuth did not finish. Complete consent in the popup, then try again.')
+      }
       return
     }
     case 'needs_secret':
       opts.onNeedsSecret(result.slug, result.template.id, result.template.label)
-      return
-    case 'needs_choice':
-      opts.onNeedsChoice(result.candidates)
-      return
-    case 'needs_erxes':
-      opts.onNeedsErxes()
-      return
-    case 'unsupported_kind':
-      opts.onError(`${result.kind.toUpperCase()} connect is not supported yet. Try an MCP server.`)
-      return
-    case 'error':
-      opts.onError(result.message)
       return
   }
 }
@@ -83,20 +102,18 @@ export function AddExecutorIntegrationModal({
   onOpenChange,
   onConnected,
   connected,
+  initialCatalogId,
 }: Props) {
   const { authenticatedApi } = useAuthenticatedApi()
   const [q, setQ] = useState('')
   const [kind, setKind] = useState<'' | ExecutorIntegrationKind>('')
-  const [catalog, setCatalog] = useState<IntegrationCatalogSurface | null>(null)
+  const [catalog, setCatalog] = useState<IntegrationCatalogRow[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [secret, setSecret] = useState<{ slug: string; template: string; label: string } | null>(
     null,
   )
   const [secretValue, setSecretValue] = useState('')
-  const [choices, setChoices] = useState<ExecutorDetectCandidate[] | null>(null)
-
-  const [oauthSlug, setOauthSlug] = useState<string | null>(null)
 
   const connectedByEndpoint = useMemo(() => {
     const map = new Map<string, ExecutorIntegrationInfo>()
@@ -109,15 +126,15 @@ export function AddExecutorIntegrationModal({
 
   const loadCatalog = useCallback(async () => {
     try {
-      const surface = await authenticatedApi.listIntegrationCatalog({
+      const rows = await authenticatedApi.listIntegrationCatalog({
         q: q.trim() || undefined,
         kind: kind || undefined,
         limit: 80,
       })
-      setCatalog(surface)
+      setCatalog(rows)
     } catch (err) {
       logRpcFailure('Failed to load integration catalog:', err)
-      setCatalog({ fetchedAt: 0, stale: true, entries: [] })
+      setCatalog([])
     }
   }, [authenticatedApi, q, kind])
 
@@ -134,52 +151,22 @@ export function AddExecutorIntegrationModal({
       setError(null)
       setSecret(null)
       setSecretValue('')
-      setChoices(null)
-      setOauthSlug(null)
       setQ('')
       setKind('')
+      setCatalog(null)
     }
   }, [open])
 
-  useEffect(() => {
-    if (!oauthSlug) return
-    const deadline = Date.now() + 120_000
-    const id = setInterval(() => {
-      onConnected()
-      if (Date.now() > deadline) {
-        clearInterval(id)
-        setOauthSlug(null)
-      }
-    }, 2500)
-    return () => clearInterval(id)
-  }, [oauthSlug, onConnected])
-
-  useEffect(() => {
-    if (!oauthSlug) return
-    if (connected.some((c) => c.slug === oauthSlug && c.connected)) {
-      setOauthSlug(null)
-      onOpenChange(false)
-    }
-  }, [connected, oauthSlug, onOpenChange])
-
   const runHandlers = {
+    listIntegrations: () => authenticatedApi.listExecutorIntegrations(),
     onConnected: () => {
       onConnected()
       onOpenChange(false)
     },
-    onOauthStarted: (slug: string) => {
-      setOauthSlug(slug)
-      setError(null)
-      onConnected()
-    },
     onNeedsSecret: (slug: string, templateId: string, label: string) => {
       setSecret({ slug, template: templateId, label })
     },
-    onNeedsChoice: (candidates: ExecutorDetectCandidate[]) => {
-      setChoices(candidates)
-    },
     onError: (message: string) => setError(message),
-    onNeedsErxes: () => setError('Sign in with erxes first, then connect integrations.'),
   }
 
   const connectCatalogRow = async (row: IntegrationCatalogRow) => {
@@ -193,11 +180,49 @@ export function AddExecutorIntegrationModal({
       await handleConnectResult(result, runHandlers)
     } catch (err) {
       logRpcFailure('beginExecutorConnect failed:', err)
-      setError('Connect failed.')
+      setError(err instanceof Error ? err.message : 'Connect failed.')
     } finally {
       setBusy(false)
     }
   }
+
+  useEffect(() => {
+    if (!open || !initialCatalogId || busy || secret) return
+    let cancelled = false
+    void (async () => {
+      setBusy(true)
+      setError(null)
+      try {
+        const result = await authenticatedApi.beginExecutorConnect({
+          source: 'catalog',
+          catalogId: initialCatalogId,
+        })
+        if (cancelled) return
+        await handleConnectResult(result, {
+          listIntegrations: () => authenticatedApi.listExecutorIntegrations(),
+          onConnected: () => {
+            onConnected()
+            onOpenChange(false)
+          },
+          onNeedsSecret: (slug, templateId, label) => {
+            setSecret({ slug, template: templateId, label })
+          },
+          onError: (message) => setError(message),
+        })
+      } catch (err) {
+        if (cancelled) return
+        logRpcFailure('beginExecutorConnect failed:', err)
+        setError(err instanceof Error ? err.message : 'Connect failed.')
+      } finally {
+        if (!cancelled) setBusy(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // One-shot when opening from a catalog tile.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialCatalogId])
 
   const connectDetectOrSearch = async () => {
     const trimmed = q.trim()
@@ -216,7 +241,7 @@ export function AddExecutorIntegrationModal({
       }
     } catch (err) {
       logRpcFailure('detect/connect failed:', err)
-      setError('Connect failed.')
+      setError(err instanceof Error ? err.message : 'Connect failed.')
     } finally {
       setBusy(false)
     }
@@ -227,36 +252,29 @@ export function AddExecutorIntegrationModal({
     setBusy(true)
     setError(null)
     try {
-      const result = await authenticatedApi.submitExecutorSecret({
+      await authenticatedApi.submitExecutorSecret({
         slug: secret.slug,
         template: secret.template,
         value: secretValue.trim(),
       })
-      if (result.status === 'connected') {
-        onConnected()
-        onOpenChange(false)
-      } else if (result.status === 'needs_erxes') {
-        setError('Sign in with erxes first.')
-      } else {
-        setError(result.message)
-      }
+      onConnected()
+      onOpenChange(false)
     } catch (err) {
       logRpcFailure('submitExecutorSecret failed:', err)
-      setError('Save secret failed.')
+      setError(err instanceof Error ? err.message : 'Save secret failed.')
     } finally {
       setBusy(false)
     }
   }
 
-  const entries = catalog?.entries ?? []
+  const entries = catalog ?? []
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog
-        className="responsive-dialog connect-connector-dialog !z-[1000] !top-[clamp(28px,8vh,80px)] !flex !max-h-[calc(100vh-clamp(28px,8vh,80px)-28px)] !w-[min(560px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
-        size="lg"
-      >
-          <div className="flex shrink-0 items-start justify-between gap-3 border-b border-kumo-line px-5 py-4">
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
+        <Dialog.Content className="connect-connector-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base shadow-xl">
+          <div className="flex items-start justify-between gap-3 border-b border-kumo-line px-5 py-4">
             <div>
               <Dialog.Title className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">
                 Connect an integration
@@ -265,13 +283,13 @@ export function AddExecutorIntegrationModal({
                 Search the catalog, or paste an MCP URL to detect.
               </Dialog.Description>
             </div>
-            <Dialog.Close
-              render={(props) => (
-                <WorkshopIconButton {...props} aria-label="Close" className="shrink-0">
-                  <X size={16} />
-                </WorkshopIconButton>
-              )}
-            />
+            <WorkshopIconButton
+              aria-label="Close"
+              onClick={() => onOpenChange(false)}
+              className="shrink-0"
+            >
+              <X size={16} />
+            </WorkshopIconButton>
           </div>
 
           <div className="new-gatekeeper-scroll-balanced flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
@@ -292,39 +310,6 @@ export function AddExecutorIntegrationModal({
                 <WorkshopButton disabled={busy || !secretValue.trim()} onClick={() => void submitSecret()}>
                   {busy ? 'Saving…' : 'Save and connect'}
                 </WorkshopButton>
-              </div>
-            ) : choices ? (
-              <div className="flex flex-col gap-2">
-                <p className="text-[13px] text-kumo-subtle">Pick a detected surface:</p>
-                {choices.map((c) => (
-                  <button
-                    key={`${c.kind}:${c.endpoint}`}
-                    type="button"
-                    disabled={busy}
-                    className="rounded-xl border border-kumo-line px-3 py-2 text-left text-[13px] hover:bg-kumo-inset"
-                    onClick={() => {
-                      void (async () => {
-                        setBusy(true)
-                        setChoices(null)
-                        try {
-                          const result = await authenticatedApi.beginExecutorConnect({
-                            source: 'manual',
-                            kind: c.kind,
-                            endpoint: c.endpoint,
-                            name: c.name,
-                          })
-                          await handleConnectResult(result, runHandlers)
-                        } finally {
-                          setBusy(false)
-                        }
-                      })()
-                    }}
-                  >
-                    <span className="font-medium text-kumo-default">{c.name}</span>
-                    <span className="ml-2 text-kumo-inactive">{c.kind}</span>
-                    <div className="mt-0.5 truncate text-[12px] text-kumo-subtle">{c.endpoint}</div>
-                  </button>
-                ))}
               </div>
             ) : (
               <>
@@ -368,24 +353,18 @@ export function AddExecutorIntegrationModal({
                   ))}
                 </div>
 
-                {oauthSlug && (
-                  <p className="text-[12px] text-kumo-subtle">
-                    Finish sign-in in the popup. This dialog closes when the connection appears.
-                  </p>
-                )}
-
                 {error && <p className="text-[12px] text-red-600">{error}</p>}
 
                 <ul className="flex flex-col gap-1.5">
                   {entries.map((row) => {
                     const already =
-                      (row.endpoint && connectedByEndpoint.has(row.endpoint)) ||
-                      connected.some((c) => c.name === row.name && c.kind === row.kind)
+                      connectedByEndpoint.has(row.endpoint) ||
+                      connected.some((c) => c.name === row.name && c.kind === row.kind && c.connected)
                     return (
                       <li key={row.id}>
                         <button
                           type="button"
-                          disabled={busy || already || row.kind !== 'mcp' || !row.endpoint}
+                          disabled={busy || already || row.kind !== 'mcp'}
                           onClick={() => void connectCatalogRow(row)}
                           className="flex w-full items-center gap-3 rounded-xl border border-kumo-line px-3 py-2.5 text-left transition-colors hover:bg-kumo-inset disabled:opacity-50"
                         >
@@ -425,7 +404,8 @@ export function AddExecutorIntegrationModal({
               </>
             )}
           </div>
-      </Dialog>
+        </Dialog.Content>
+      </Dialog.Portal>
     </Dialog.Root>
   )
 }

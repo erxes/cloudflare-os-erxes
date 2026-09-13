@@ -28,11 +28,9 @@ import type {
   BeginExecutorConnectInput,
   BeginExecutorConnectResult,
   ExecutorIntegrationInfo,
-  IntegrationCatalogQuery,
+  ExecutorIntegrationKind,
   IntegrationCatalogRow,
-  IntegrationCatalogSurface,
   SubmitExecutorSecretInput,
-  SubmitExecutorSecretResult,
 } from "@gadgets/workshop-shared/api";
 import type { ClassifiedTool, ServerTrust } from "@gadgets/mcp-shared/tools";
 import { hostOf } from "@gadgets/mcp-shared/util";
@@ -804,23 +802,20 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     return next;
   }
 
-  async listIntegrationCatalog(
-    query?: IntegrationCatalogQuery,
-  ): Promise<IntegrationCatalogSurface> {
+  async listIntegrationCatalog(query?: {
+    q?: string;
+    kind?: ExecutorIntegrationKind;
+    limit?: number;
+  }): Promise<IntegrationCatalogRow[]> {
     const identity = this.identity();
     if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
-      return { fetchedAt: 0, stale: true, entries: [] };
+      return [];
     }
     try {
       const loaded = await this.#loadCatalogEntries();
-      const age = Date.now() - loaded.fetchedAt;
-      return {
-        fetchedAt: loaded.fetchedAt,
-        stale: age >= CATALOG_CACHE_TTL_MS,
-        entries: filterCatalog(loaded.entries, query),
-      };
+      return filterCatalog(loaded.entries, query);
     } catch {
-      return { fetchedAt: 0, stale: true, entries: [] };
+      return [];
     }
   }
 
@@ -829,72 +824,51 @@ export class ErxesLoginAccount extends DurableObject<Env> {
   ): Promise<BeginExecutorConnectResult> {
     const identity = this.identity();
     if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
-      return { status: "needs_erxes" };
+      throw new Error("Sign in to erxes again.");
     }
-    try {
-      const api = await this.#executorJson();
-      const origin = getExecutorUrl(this.env);
+    const api = await this.#executorJson();
+    const origin = getExecutorUrl(this.env);
 
-      if (input.source === "detect") {
-        const detected = await api("POST", "/api/integrations/detect", { url: input.url.trim() });
-        if (!detected.ok) {
-          return { status: "error", message: `Detect failed (${detected.status}).` };
-        }
-        const candidates = rankDetectCandidates(detected.json);
-        if (candidates.length === 0) {
-          return { status: "error", message: "Could not detect an integration from that URL." };
-        }
-        if (candidates.length > 1) {
-          return { status: "needs_choice", candidates };
-        }
-        const c = candidates[0]!;
-        return connectMcpTarget(
-          api,
-          { kind: c.kind, endpoint: c.endpoint, name: c.name, slugHint: c.slug },
-          origin,
-        );
+    if (input.source === "detect") {
+      const detected = await api("POST", "/api/integrations/detect", { url: input.url.trim() });
+      if (!detected.ok) {
+        throw new Error(`Detect failed (${detected.status}).`);
       }
-
-      if (input.source === "manual") {
-        return connectMcpTarget(
-          api,
-          {
-            kind: input.kind,
-            endpoint: input.endpoint.trim(),
-            name: input.name?.trim() || input.endpoint.trim(),
-          },
-          origin,
-        );
+      const candidates = rankDetectCandidates(detected.json);
+      if (candidates.length === 0) {
+        throw new Error("Could not detect an integration from that URL.");
       }
-
-      const catalog = await this.#loadCatalogEntries();
-      const resolved = resolveFromCatalog(input, catalog.entries);
-      if ("error" in resolved) return { status: "error", message: resolved.error };
-      return connectMcpTarget(api, resolved, origin);
-    } catch (err) {
-      return {
-        status: "error",
-        message: err instanceof Error ? err.message : "Connect failed.",
-      };
+      const c = candidates[0]!;
+      return connectMcpTarget(
+        api,
+        { kind: c.kind, endpoint: c.endpoint, name: c.name, slugHint: c.slug },
+        origin,
+      );
     }
+
+    if (input.source === "manual") {
+      return connectMcpTarget(
+        api,
+        {
+          kind: input.kind,
+          endpoint: input.endpoint.trim(),
+          name: input.name?.trim() || input.endpoint.trim(),
+        },
+        origin,
+      );
+    }
+
+    const catalog = await this.#loadCatalogEntries();
+    return connectMcpTarget(api, resolveFromCatalog(input, catalog.entries), origin);
   }
 
-  async submitExecutorSecret(
-    input: SubmitExecutorSecretInput,
-  ): Promise<SubmitExecutorSecretResult> {
+  async submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }> {
     const identity = this.identity();
     if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
-      return { status: "needs_erxes" };
+      throw new Error("Sign in to erxes again.");
     }
-    try {
-      const api = await this.#executorJson();
-      return await submitSecret(api, input);
-    } catch (err) {
-      return {
-        status: "error",
-        message: err instanceof Error ? err.message : "Save secret failed.",
-      };
-    }
+    const api = await this.#executorJson();
+    return submitSecret(api, input);
   }
 
   async executorCredentialsExpired() {
@@ -973,9 +947,11 @@ export class ErxesUser extends WorkerEntrypoint<Env, ErxesUserProps> implements 
     return this.#account().listExecutorIntegrations();
   }
 
-  async listIntegrationCatalog(
-    query?: IntegrationCatalogQuery,
-  ): Promise<IntegrationCatalogSurface> {
+  async listIntegrationCatalog(query?: {
+    q?: string;
+    kind?: ExecutorIntegrationKind;
+    limit?: number;
+  }): Promise<IntegrationCatalogRow[]> {
     return this.#account().listIntegrationCatalog(query);
   }
 
@@ -985,9 +961,7 @@ export class ErxesUser extends WorkerEntrypoint<Env, ErxesUserProps> implements 
     return this.#account().beginExecutorConnect(input);
   }
 
-  async submitExecutorSecret(
-    input: SubmitExecutorSecretInput,
-  ): Promise<SubmitExecutorSecretResult> {
+  async submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }> {
     return this.#account().submitExecutorSecret(input);
   }
 

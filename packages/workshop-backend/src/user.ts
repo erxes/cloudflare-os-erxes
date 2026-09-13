@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ExecutorIntegrationInfo, IntegrationCatalogQuery, IntegrationCatalogSurface, BeginExecutorConnectInput, BeginExecutorConnectResult, SubmitExecutorSecretInput, SubmitExecutorSecretResult } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ExecutorIntegrationInfo, ExecutorIntegrationKind, IntegrationCatalogRow, BeginExecutorConnectInput, BeginExecutorConnectResult, SubmitExecutorSecretInput } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -658,15 +658,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async listIntegrationCatalog(
-    query?: IntegrationCatalogQuery,
-  ): Promise<IntegrationCatalogSurface> {
+  async listIntegrationCatalog(query?: {
+    q?: string;
+    kind?: ExecutorIntegrationKind;
+    limit?: number;
+  }): Promise<IntegrationCatalogRow[]> {
     const erxes = await this.getErxesGatekeeperAccount();
-    if (!erxes) return { fetchedAt: 0, stale: true, entries: [] };
+    if (!erxes) return [];
     try {
       return await erxes.listIntegrationCatalog(query);
     } catch {
-      return { fetchedAt: 0, stale: true, entries: [] };
+      return [];
     }
   }
 
@@ -674,15 +676,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     input: BeginExecutorConnectInput,
   ): Promise<BeginExecutorConnectResult> {
     const erxes = await this.getErxesGatekeeperAccount();
-    if (!erxes) return { status: "needs_erxes" };
+    if (!erxes) throw new Error("Sign in to erxes again.");
     return erxes.beginExecutorConnect(input);
   }
 
-  async submitExecutorSecret(
-    input: SubmitExecutorSecretInput,
-  ): Promise<SubmitExecutorSecretResult> {
+  async submitExecutorSecret(input: SubmitExecutorSecretInput): Promise<{ slug: string }> {
     const erxes = await this.getErxesGatekeeperAccount();
-    if (!erxes) return { status: "needs_erxes" };
+    if (!erxes) throw new Error("Sign in to erxes again.");
     return erxes.submitExecutorSecret(input);
   }
 
