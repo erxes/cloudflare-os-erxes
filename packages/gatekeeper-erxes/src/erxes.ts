@@ -10,6 +10,30 @@ import { generateSessionTypes, sessionTypeName } from "@gadgets/mcp-shared/schem
 import { sameEndpoint, type ToolScope } from "@gadgets/mcp-shared/scope";
 import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import ERXES_LOGO_SVG from "./erxes-logo.svg";
+import {
+  CATALOG_CACHE_TTL_MS,
+  filterCatalog,
+  INTEGRATIONS_SH_URL,
+  mergeExecutorCatalog,
+  normalizeIntegrationsShCatalog,
+} from "./executor-catalog";
+import {
+  connectMcpTarget,
+  rankDetectCandidates,
+  resolveFromCatalog,
+  submitSecret,
+  type ExecutorJson,
+} from "./executor-connect";
+import type {
+  BeginExecutorConnectInput,
+  BeginExecutorConnectResult,
+  ExecutorIntegrationInfo,
+  IntegrationCatalogQuery,
+  IntegrationCatalogRow,
+  IntegrationCatalogSurface,
+  SubmitExecutorSecretInput,
+  SubmitExecutorSecretResult,
+} from "@gadgets/workshop-shared/api";
 import type { ClassifiedTool, ServerTrust } from "@gadgets/mcp-shared/tools";
 import { hostOf } from "@gadgets/mcp-shared/util";
 import {
@@ -717,6 +741,162 @@ export class ErxesLoginAccount extends DurableObject<Env> {
     return executorToken(this.env, identity);
   }
 
+  async #executorJson(): Promise<ExecutorJson> {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      throw new Error("Sign in to erxes again.");
+    }
+    const token = await executorToken(this.env, identity);
+    const origin = getExecutorUrl(this.env).replace(/\/$/, "");
+    return async (method, path, body) => {
+      const res = await fetch(`${origin}${path.startsWith("/") ? path : `/${path}`}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+      let json: unknown = null;
+      try {
+        json = await res.json();
+      } catch {
+        json = null;
+      }
+      return { ok: res.ok, status: res.status, json };
+    };
+  }
+
+  async listExecutorIntegrations(): Promise<ExecutorIntegrationInfo[]> {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      return [];
+    }
+    try {
+      const api = await this.#executorJson();
+      const [integrations, connections] = await Promise.all([
+        api("GET", "/api/integrations"),
+        api("GET", "/api/connections"),
+      ]);
+      if (!integrations.ok) return [];
+      return mergeExecutorCatalog(integrations.json, connections.ok ? connections.json : []);
+    } catch {
+      return [];
+    }
+  }
+
+  async #loadCatalogEntries(): Promise<{ fetchedAt: number; entries: IntegrationCatalogRow[] }> {
+    const cached = this.ctx.storage.kv.get<{ fetchedAt: number; entries: IntegrationCatalogRow[] }>(
+      "integrationsShCatalog",
+    );
+    if (cached && Date.now() - cached.fetchedAt < CATALOG_CACHE_TTL_MS) {
+      return cached;
+    }
+    const res = await fetch(INTEGRATIONS_SH_URL);
+    if (!res.ok) {
+      if (cached) return cached;
+      throw new Error(`integrations.sh fetch failed (${res.status}).`);
+    }
+    const envelope = await res.json();
+    const entries = normalizeIntegrationsShCatalog(envelope);
+    const next = { fetchedAt: Date.now(), entries };
+    this.ctx.storage.kv.put("integrationsShCatalog", next);
+    return next;
+  }
+
+  async listIntegrationCatalog(
+    query?: IntegrationCatalogQuery,
+  ): Promise<IntegrationCatalogSurface> {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      return { fetchedAt: 0, stale: true, entries: [] };
+    }
+    try {
+      const loaded = await this.#loadCatalogEntries();
+      const age = Date.now() - loaded.fetchedAt;
+      return {
+        fetchedAt: loaded.fetchedAt,
+        stale: age >= CATALOG_CACHE_TTL_MS,
+        entries: filterCatalog(loaded.entries, query),
+      };
+    } catch {
+      return { fetchedAt: 0, stale: true, entries: [] };
+    }
+  }
+
+  async beginExecutorConnect(
+    input: BeginExecutorConnectInput,
+  ): Promise<BeginExecutorConnectResult> {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      return { status: "needs_erxes" };
+    }
+    try {
+      const api = await this.#executorJson();
+      const origin = getExecutorUrl(this.env);
+
+      if (input.source === "detect") {
+        const detected = await api("POST", "/api/integrations/detect", { url: input.url.trim() });
+        if (!detected.ok) {
+          return { status: "error", message: `Detect failed (${detected.status}).` };
+        }
+        const candidates = rankDetectCandidates(detected.json);
+        if (candidates.length === 0) {
+          return { status: "error", message: "Could not detect an integration from that URL." };
+        }
+        if (candidates.length > 1) {
+          return { status: "needs_choice", candidates };
+        }
+        const c = candidates[0]!;
+        return connectMcpTarget(
+          api,
+          { kind: c.kind, endpoint: c.endpoint, name: c.name, slugHint: c.slug },
+          origin,
+        );
+      }
+
+      if (input.source === "manual") {
+        return connectMcpTarget(
+          api,
+          {
+            kind: input.kind,
+            endpoint: input.endpoint.trim(),
+            name: input.name?.trim() || input.endpoint.trim(),
+          },
+          origin,
+        );
+      }
+
+      const catalog = await this.#loadCatalogEntries();
+      const resolved = resolveFromCatalog(input, catalog.entries);
+      if ("error" in resolved) return { status: "error", message: resolved.error };
+      return connectMcpTarget(api, resolved, origin);
+    } catch (err) {
+      return {
+        status: "error",
+        message: err instanceof Error ? err.message : "Connect failed.",
+      };
+    }
+  }
+
+  async submitExecutorSecret(
+    input: SubmitExecutorSecretInput,
+  ): Promise<SubmitExecutorSecretResult> {
+    const identity = this.identity();
+    if (!identity || this.ctx.storage.kv.get<boolean>("credentialsExpired")) {
+      return { status: "needs_erxes" };
+    }
+    try {
+      const api = await this.#executorJson();
+      return await submitSecret(api, input);
+    } catch (err) {
+      return {
+        status: "error",
+        message: err instanceof Error ? err.message : "Save secret failed.",
+      };
+    }
+  }
+
   async executorCredentialsExpired() {
     this.ctx.storage.kv.put("credentialsExpired", true);
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
@@ -787,6 +967,28 @@ export class ErxesUser extends WorkerEntrypoint<Env, ErxesUserProps> implements 
 
   async revoke() {
     await this.#account().revoke();
+  }
+
+  async listExecutorIntegrations(): Promise<ExecutorIntegrationInfo[]> {
+    return this.#account().listExecutorIntegrations();
+  }
+
+  async listIntegrationCatalog(
+    query?: IntegrationCatalogQuery,
+  ): Promise<IntegrationCatalogSurface> {
+    return this.#account().listIntegrationCatalog(query);
+  }
+
+  async beginExecutorConnect(
+    input: BeginExecutorConnectInput,
+  ): Promise<BeginExecutorConnectResult> {
+    return this.#account().beginExecutorConnect(input);
+  }
+
+  async submitExecutorSecret(
+    input: SubmitExecutorSecretInput,
+  ): Promise<SubmitExecutorSecretResult> {
+    return this.#account().submitExecutorSecret(input);
   }
 
   reconnect(): Promise<{ url: string }> {
