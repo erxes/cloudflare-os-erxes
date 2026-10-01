@@ -96,6 +96,13 @@ describe("bundled format blueprints", () => {
     expect(client).toContain("app.replaceChildren(canvas)");
   });
 
+  it("normalizes themeVersion in format.slides setDeck", async () => {
+    let entry = FORMAT_BLUEPRINTS.find(blueprint => blueprint.blueprintId === "format.slides")!;
+    let serverCode = await readBlueprintFile(entry, "server.js");
+    expect(serverCode).toContain('themeVersion: "workspace.1"');
+    expect(serverCode).toContain("async setDeck(deck)");
+  });
+
   it("declares the intended export formats for every standard output format", async () => {
     let expectedFormats: Record<string, string[]> = {
       "format.document": [
